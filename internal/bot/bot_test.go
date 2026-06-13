@@ -65,6 +65,25 @@ func TestParseAddArgs(t *testing.T) {
 	}
 }
 
+func TestValidAlias(t *testing.T) {
+	for _, alias := range []string{"home", "Work-36", "school_bus", "a1"} {
+		if !validAlias(alias) {
+			t.Errorf("validAlias(%q) = false, want true", alias)
+		}
+	}
+	for _, alias := range []string{"", "1home", "two words", "home!", strings.Repeat("a", 33)} {
+		if validAlias(alias) {
+			t.Errorf("validAlias(%q) = true, want false", alias)
+		}
+	}
+}
+
+func TestWatchLabelIncludesAlias(t *testing.T) {
+	if got := watchLabel(store.Watch{ID: 3, Alias: "home"}); got != "Watch #3 (home)" {
+		t.Fatalf("watchLabel() = %q", got)
+	}
+}
+
 func TestFormatETASortsStopServiceCombinationsByNextArrival(t *testing.T) {
 	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
 	watch := store.Watch{

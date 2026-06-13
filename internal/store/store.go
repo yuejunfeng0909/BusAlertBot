@@ -14,12 +14,14 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("watch item not found")
-	ErrDuplicate = errors.New("watch item already exists")
+	ErrNotFound       = errors.New("watch item not found")
+	ErrDuplicate      = errors.New("watch item already exists")
+	ErrDuplicateAlias = errors.New("watch alias already exists")
 )
 
 type Watch struct {
 	ID            int                `json:"id"`
+	Alias         string             `json:"alias,omitempty"`
 	Stops         []WatchStop        `json:"stops,omitempty"`
 	ServiceNos    []string           `json:"service_nos,omitempty"`
 	Combinations  []WatchCombination `json:"combinations,omitempty"`
@@ -100,6 +102,9 @@ func (s *Store) Add(chatID int64, watch Watch) (Watch, error) {
 		if sameWatch(existing, watch) {
 			return Watch{}, ErrDuplicate
 		}
+		if watch.Alias != "" && strings.EqualFold(existing.Alias, watch.Alias) {
+			return Watch{}, ErrDuplicateAlias
+		}
 	}
 	if user.NextID < 1 {
 		user.NextID = 1
@@ -141,6 +146,64 @@ func (s *Store) Get(chatID int64, id int) (Watch, error) {
 		}
 	}
 	return Watch{}, ErrNotFound
+}
+
+func (s *Store) Resolve(chatID int64, reference string) (Watch, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	reference = strings.TrimSpace(reference)
+	user := s.state.Users[key(chatID)]
+	if user == nil {
+		return Watch{}, ErrNotFound
+	}
+	if id, err := strconv.Atoi(reference); err == nil {
+		for _, watch := range user.Watches {
+			if watch.ID == id {
+				return watch, nil
+			}
+		}
+		return Watch{}, ErrNotFound
+	}
+	for _, watch := range user.Watches {
+		if watch.Alias != "" && strings.EqualFold(watch.Alias, reference) {
+			return watch, nil
+		}
+	}
+	return Watch{}, ErrNotFound
+}
+
+func (s *Store) SetAlias(chatID int64, id int, alias string) (Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user := s.state.Users[key(chatID)]
+	if user == nil {
+		return Watch{}, ErrNotFound
+	}
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	target := -1
+	for i := range user.Watches {
+		if user.Watches[i].ID == id {
+			target = i
+			break
+		}
+	}
+	if target == -1 {
+		return Watch{}, ErrNotFound
+	}
+	for _, watch := range user.Watches {
+		if watch.ID != id && watch.Alias != "" && strings.EqualFold(watch.Alias, alias) {
+			return Watch{}, ErrDuplicateAlias
+		}
+	}
+	oldAlias := user.Watches[target].Alias
+	user.Watches[target].Alias = alias
+	if err := s.saveLocked(); err != nil {
+		user.Watches[target].Alias = oldAlias
+		return Watch{}, err
+	}
+	return user.Watches[target], nil
 }
 
 func (s *Store) Delete(chatID int64, id int) error {
@@ -243,6 +306,7 @@ func (s *Store) user(chatID int64) *User {
 }
 
 func normalizeWatch(watch *Watch) {
+	watch.Alias = strings.ToLower(strings.TrimSpace(watch.Alias))
 	if len(watch.Stops) == 0 && watch.StopCode != "" {
 		watch.Stops = []WatchStop{{
 			Code:     watch.StopCode,

@@ -8,6 +8,7 @@ updates, and schedule a daily notification prompt.
 
 - Search bus stops by name, road, or five-digit stop code.
 - Add and delete multi-stop, multi-service watches with stable, auto-incrementing IDs.
+- Assign case-insensitive aliases and use them anywhere a watch ID is accepted.
 - Show all watches and daily schedules with `/watchlist`.
 - Send a one-time ETA prompt manually or at a daily scheduled time.
 - Start ETA updates every minute for 15 minutes with an inline button.
@@ -101,10 +102,11 @@ pulls are required.
 /find <name>
 /add <stop[, stop...]> | <service[, service...]>
 /watchlist
-/delete <ID>
-/notify <ID>
-/schedule <ID> <HH:MM>
-/unschedule <ID>
+/alias <watch> <name>
+/delete <watch>
+/notify <watch>
+/schedule <watch> <HH:MM>
+/unschedule <watch>
 /help
 ```
 
@@ -114,9 +116,13 @@ Example:
 /find Raffles Hotel
 /add 02049 | 36
 /add 02049, 04167 | 36, 111
-/notify 1
-/schedule 1 07:30
+/alias 1 home
+/notify home
+/schedule home 07:30
 ```
+
+`<watch>` can be a watch ID or a case-insensitive alias. Aliases must start
+with a letter and may contain letters, numbers, hyphens, and underscores.
 
 Daily times use `TIMEZONE`, which defaults to `Asia/Singapore`. At the
 configured time, the bot sends one ETA notification with a
