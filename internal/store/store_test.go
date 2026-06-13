@@ -74,6 +74,72 @@ func TestStoreRejectsReorderedMultiWatchAsDuplicate(t *testing.T) {
 	}
 }
 
+func TestStoreAliasesResolveCaseInsensitivelyAndPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	data, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch, err := data.Add(42, Watch{StopCode: "02049", StopName: "Raffles Hotel", ServiceNo: "36"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch, err = data.SetAlias(42, watch.ID, "Home-36")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watch.Alias != "home-36" {
+		t.Fatalf("alias = %q, want home-36", watch.Alias)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := reopened.Resolve(42, "HOME-36")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ID != watch.ID {
+		t.Fatalf("resolved ID = %d, want %d", resolved.ID, watch.ID)
+	}
+	resolved, err = reopened.Resolve(42, "1")
+	if err != nil || resolved.ID != watch.ID {
+		t.Fatalf("numeric resolve = %#v, %v", resolved, err)
+	}
+}
+
+func TestStoreRejectsDuplicateAliasWithinChat(t *testing.T) {
+	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := data.Add(42, Watch{StopCode: "02049", ServiceNo: "36"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := data.Add(42, Watch{StopCode: "04167", ServiceNo: "111"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := data.SetAlias(42, first.ID, "home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := data.SetAlias(42, second.ID, "HOME"); !errors.Is(err, ErrDuplicateAlias) {
+		t.Fatalf("duplicate alias error = %v, want ErrDuplicateAlias", err)
+	}
+	otherChat, err := data.Add(99, Watch{StopCode: "04167", ServiceNo: "111"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := data.SetAlias(99, otherChat.ID, "home"); err != nil {
+		t.Fatalf("reuse alias in another chat: %v", err)
+	}
+	if _, err := data.SetAlias(42, 999, "home"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing watch error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestClaimDueOnlyOncePerMinute(t *testing.T) {
 	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

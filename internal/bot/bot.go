@@ -118,6 +118,8 @@ func (b *Bot) handleMessage(ctx context.Context, message *telegram.Message) {
 		b.handleFind(ctx, chatID, args)
 	case "/watchlist", "/list":
 		b.handleWatchlist(ctx, chatID)
+	case "/alias":
+		b.handleAlias(ctx, chatID, args)
 	case "/delete":
 		b.handleDelete(ctx, chatID, args)
 	case "/notify":
@@ -223,15 +225,46 @@ func (b *Bot) handleWatchlist(ctx context.Context, chatID int64) {
 	var text strings.Builder
 	text.WriteString("Your watchlist:\n")
 	for _, watch := range watches {
-		fmt.Fprintf(&text, "\n#%d", watch.ID)
+		fmt.Fprintf(&text, "\n%s", watchLabel(watch))
 		writeWatchCombinations(&text, watch)
 		if watch.Schedule != "" {
 			fmt.Fprintf(&text, "\nDaily: %s", watch.Schedule)
 		}
 		text.WriteByte('\n')
 	}
-	text.WriteString("\nUse /notify <ID>, /schedule <ID> HH:MM, or /delete <ID>.")
+	text.WriteString("\nUse /alias <watch> <name> to add an alias. Commands accept an ID or alias.")
 	b.send(ctx, chatID, text.String(), false, nil)
+}
+
+func (b *Bot) handleAlias(ctx context.Context, chatID int64, args string) {
+	fields := strings.Fields(args)
+	if len(fields) != 2 {
+		b.send(ctx, chatID, "Usage: /alias <watch ID or alias> <new alias>\nExample: /alias 2 home", false, nil)
+		return
+	}
+	if !validAlias(fields[1]) {
+		b.send(ctx, chatID, "Aliases must be 1-32 characters, start with a letter, and contain only letters, numbers, hyphens, or underscores.", false, nil)
+		return
+	}
+	watch, err := b.store.Resolve(chatID, fields[0])
+	if errors.Is(err, store.ErrNotFound) {
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
+		return
+	}
+	if err != nil {
+		b.fail(chatID, "load watch item", err)
+		return
+	}
+	watch, err = b.store.SetAlias(chatID, watch.ID, fields[1])
+	if errors.Is(err, store.ErrDuplicateAlias) {
+		b.send(ctx, chatID, "Another watch already uses that alias.", false, nil)
+		return
+	}
+	if err != nil {
+		b.fail(chatID, "save watch alias", err)
+		return
+	}
+	b.send(ctx, chatID, fmt.Sprintf("You can now refer to this watch as %q.", watch.Alias), false, nil)
 }
 
 func (b *Bot) handleDelete(ctx context.Context, chatID int64, args string) {
@@ -239,20 +272,28 @@ func (b *Bot) handleDelete(ctx context.Context, chatID int64, args string) {
 		b.promptWatchSelection(ctx, chatID, "delete", "Choose a watch to delete:")
 		return
 	}
-	id, ok := parseID(args)
-	if !ok {
-		b.send(ctx, chatID, "Usage: /delete <watch ID>", false, nil)
+	if len(strings.Fields(args)) != 1 {
+		b.send(ctx, chatID, "Usage: /delete <watch ID or alias>", false, nil)
 		return
 	}
-	if err := b.store.Delete(chatID, id); errors.Is(err, store.ErrNotFound) {
-		b.send(ctx, chatID, "No watch item has that ID.", false, nil)
+	watch, err := b.store.Resolve(chatID, args)
+	if errors.Is(err, store.ErrNotFound) {
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
+		return
+	}
+	if err != nil {
+		b.fail(chatID, "load watch item", err)
+		return
+	}
+	if err := b.store.Delete(chatID, watch.ID); errors.Is(err, store.ErrNotFound) {
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
 		return
 	} else if err != nil {
 		b.fail(chatID, "delete watch item", err)
 		return
 	}
-	b.dismiss(chatID, id)
-	b.send(ctx, chatID, fmt.Sprintf("Deleted watch #%d.", id), false, nil)
+	b.dismiss(chatID, watch.ID)
+	b.send(ctx, chatID, fmt.Sprintf("Deleted %s.", watchLabel(watch)), false, nil)
 }
 
 func (b *Bot) handleNotify(ctx context.Context, chatID int64, args string) {
@@ -260,14 +301,13 @@ func (b *Bot) handleNotify(ctx context.Context, chatID int64, args string) {
 		b.promptWatchSelection(ctx, chatID, "notify", "Choose a watch for ETA notifications:")
 		return
 	}
-	id, ok := parseID(args)
-	if !ok {
-		b.send(ctx, chatID, "Usage: /notify <watch ID>", false, nil)
+	if len(strings.Fields(args)) != 1 {
+		b.send(ctx, chatID, "Usage: /notify <watch ID or alias>", false, nil)
 		return
 	}
-	watch, err := b.store.Get(chatID, id)
+	watch, err := b.store.Resolve(chatID, args)
 	if errors.Is(err, store.ErrNotFound) {
-		b.send(ctx, chatID, "No watch item has that ID.", false, nil)
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
 		return
 	}
 	if err != nil {
@@ -280,12 +320,16 @@ func (b *Bot) handleNotify(ctx context.Context, chatID int64, args string) {
 func (b *Bot) handleSchedule(ctx context.Context, chatID int64, args string) {
 	fields := strings.Fields(args)
 	if len(fields) != 2 {
-		b.send(ctx, chatID, "Usage: /schedule <watch ID> <HH:MM>\nExample: /schedule 2 07:30", false, nil)
+		b.send(ctx, chatID, "Usage: /schedule <watch ID or alias> <HH:MM>\nExample: /schedule home 07:30", false, nil)
 		return
 	}
-	id, ok := parseID(fields[0])
-	if !ok {
-		b.send(ctx, chatID, "The watch ID must be a positive number.", false, nil)
+	watch, err := b.store.Resolve(chatID, fields[0])
+	if errors.Is(err, store.ErrNotFound) {
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
+		return
+	}
+	if err != nil {
+		b.fail(chatID, "load watch item", err)
 		return
 	}
 	parsed, err := time.Parse("15:04", fields[1])
@@ -294,16 +338,16 @@ func (b *Bot) handleSchedule(ctx context.Context, chatID int64, args string) {
 		return
 	}
 	schedule := parsed.Format("15:04")
-	watch, err := b.store.SetSchedule(chatID, id, schedule)
+	watch, err = b.store.SetSchedule(chatID, watch.ID, schedule)
 	if errors.Is(err, store.ErrNotFound) {
-		b.send(ctx, chatID, "No watch item has that ID.", false, nil)
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
 		return
 	}
 	if err != nil {
 		b.fail(chatID, "save schedule", err)
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Watch #%d will send a daily ETA prompt at %s (%s).", watch.ID, schedule, b.location.String()), false, nil)
+	b.send(ctx, chatID, fmt.Sprintf("%s will send a daily ETA prompt at %s (%s).", watchLabel(watch), schedule, b.location.String()), false, nil)
 }
 
 func (b *Bot) handleUnschedule(ctx context.Context, chatID int64, args string) {
@@ -311,21 +355,29 @@ func (b *Bot) handleUnschedule(ctx context.Context, chatID int64, args string) {
 		b.promptWatchSelection(ctx, chatID, "unschedule", "Choose a watch to unschedule:")
 		return
 	}
-	id, ok := parseID(args)
-	if !ok {
-		b.send(ctx, chatID, "Usage: /unschedule <watch ID>", false, nil)
+	if len(strings.Fields(args)) != 1 {
+		b.send(ctx, chatID, "Usage: /unschedule <watch ID or alias>", false, nil)
 		return
 	}
-	_, err := b.store.SetSchedule(chatID, id, "")
+	watch, err := b.store.Resolve(chatID, args)
 	if errors.Is(err, store.ErrNotFound) {
-		b.send(ctx, chatID, "No watch item has that ID.", false, nil)
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
+		return
+	}
+	if err != nil {
+		b.fail(chatID, "load watch item", err)
+		return
+	}
+	watch, err = b.store.SetSchedule(chatID, watch.ID, "")
+	if errors.Is(err, store.ErrNotFound) {
+		b.send(ctx, chatID, "No watch item has that ID or alias.", false, nil)
 		return
 	}
 	if err != nil {
 		b.fail(chatID, "remove schedule", err)
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from watch #%d.", id), false, nil)
+	b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from %s.", watchLabel(watch)), false, nil)
 }
 
 func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQuery) {
@@ -344,7 +396,8 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 		return
 	}
 	chatID := callback.Message.Chat.ID
-	if _, err := b.store.Get(chatID, id); err != nil {
+	watch, err := b.store.Get(chatID, id)
+	if err != nil {
 		b.answer(ctx, callback.ID, "That watch item no longer exists.")
 		return
 	}
@@ -357,15 +410,9 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 		}
 		b.dismiss(chatID, id)
 		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
-		b.send(ctx, chatID, fmt.Sprintf("Deleted watch #%d.", id), false, nil)
+		b.send(ctx, chatID, fmt.Sprintf("Deleted %s.", watchLabel(watch)), false, nil)
 		b.answer(ctx, callback.ID, "Watch deleted.")
 	case "notify":
-		watch, err := b.store.Get(chatID, id)
-		if err != nil {
-			b.fail(chatID, "load watch item", err)
-			b.answer(ctx, callback.ID, "Could not load that watch.")
-			return
-		}
 		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
 		b.answer(ctx, callback.ID, "Fetching ETAs.")
 		b.sendETA(ctx, chatID, watch, false)
@@ -376,7 +423,7 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 			return
 		}
 		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
-		b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from watch #%d.", id), false, nil)
+		b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from %s.", watchLabel(watch)), false, nil)
 		b.answer(ctx, callback.ID, "Schedule removed.")
 	case "keep", "continue":
 		b.activate(chatID, id, time.Now())
@@ -490,7 +537,8 @@ func (b *Bot) registerCommands(ctx context.Context) error {
 		{Command: "add", Description: "Add a stop and service"},
 		{Command: "find", Description: "Find a bus stop code"},
 		{Command: "watchlist", Description: "Show your watchlist"},
-		{Command: "delete", Description: "Delete a watch by ID"},
+		{Command: "alias", Description: "Add an alias to a watch"},
+		{Command: "delete", Description: "Delete a watch"},
 		{Command: "notify", Description: "Send an ETA prompt"},
 		{Command: "schedule", Description: "Schedule a daily ETA prompt"},
 		{Command: "unschedule", Description: "Remove a daily schedule"},
@@ -581,9 +629,23 @@ func validServiceNo(service string) bool {
 	return true
 }
 
-func parseID(value string) (int, bool) {
-	id, err := strconv.Atoi(strings.TrimSpace(value))
-	return id, err == nil && id > 0
+func validAlias(alias string) bool {
+	if len(alias) < 1 || len(alias) > 32 {
+		return false
+	}
+	for i, r := range alias {
+		if i == 0 && !isASCIILetter(r) {
+			return false
+		}
+		if !isASCIILetter(r) && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 func formatStopMatches(stops []lta.BusStop) string {
@@ -683,7 +745,7 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 	})
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "Watch #%d ETAs:", watch.ID)
+	fmt.Fprintf(&text, "%s ETAs:", watchLabel(watch))
 	urgent := false
 	for _, result := range results {
 		var labels []string
@@ -717,6 +779,13 @@ func formatAddedWatch(watch store.Watch) string {
 	fmt.Fprintf(&text, "Added watch #%d:", watch.ID)
 	writeWatchCombinations(&text, watch)
 	return text.String()
+}
+
+func watchLabel(watch store.Watch) string {
+	if watch.Alias == "" {
+		return fmt.Sprintf("Watch #%d", watch.ID)
+	}
+	return fmt.Sprintf("Watch %s", watch.Alias)
 }
 
 func writeWatchCombinations(text *strings.Builder, watch store.Watch) {
@@ -796,7 +865,7 @@ func watchSelectionKeyboard(action string, watches []store.Watch) *telegram.Inli
 func watchSelectionLabel(watch store.Watch) string {
 	combinations := watchCombinations(watch)
 	if len(combinations) == 0 {
-		return fmt.Sprintf("#%d", watch.ID)
+		return watchLabel(watch)
 	}
 	stopsByCode := make(map[string]store.WatchStop, len(watch.Stops))
 	for _, stop := range watch.Stops {
@@ -808,7 +877,11 @@ func watchSelectionLabel(watch store.Watch) string {
 	if stopName == "" {
 		stopName = first.StopCode
 	}
-	label := fmt.Sprintf("#%d Bus %s at %s", watch.ID, first.ServiceNo, stopName)
+	label := watch.Alias
+	if label == "" {
+		label = fmt.Sprintf("#%d", watch.ID)
+	}
+	label += fmt.Sprintf(" Bus %s at %s", first.ServiceNo, stopName)
 	if len(combinations) > 1 {
 		label += fmt.Sprintf(" +%d", len(combinations)-1)
 	}
@@ -830,12 +903,14 @@ const helpText = `Bus ETA watchlist
 
 /find <name> - find bus stop codes
 /add <stop[, stop...]> | <service[, service...]> - add a watch
-/watchlist - list watches and IDs
-/delete <ID> - delete a watch
-/notify <ID> - send an ETA prompt
-/schedule <ID> <HH:MM> - schedule a daily ETA prompt
-/unschedule <ID> - remove a daily schedule
+/watchlist - list watches, IDs, and aliases
+/alias <watch> <name> - add or change a watch alias
+/delete <watch> - delete a watch
+/notify <watch> - send an ETA prompt
+/schedule <watch> <HH:MM> - schedule a daily ETA prompt
+/unschedule <watch> - remove a daily schedule
 
 Only services that serve the selected stops are saved. Combined ETA results are sorted by the next arrival.
+Use a watch's ID or alias wherever <watch> appears.
 
 Choose "Keep notifying (15 mins)" to receive updates every minute. Choosing it again extends the updates for 15 minutes from that point. Active updates can be dismissed. Notifications are silent unless the next bus is less than 2 minutes away.`
