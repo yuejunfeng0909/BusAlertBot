@@ -42,6 +42,11 @@ type ServiceArrival struct {
 	NextBus3  Arrival `json:"NextBus3"`
 }
 
+type BusRoute struct {
+	ServiceNo   string `json:"ServiceNo"`
+	BusStopCode string `json:"BusStopCode"`
+}
+
 type Client struct {
 	accountKey string
 	baseURL    string
@@ -50,6 +55,10 @@ type Client struct {
 	stopsMu       sync.RWMutex
 	stops         []BusStop
 	stopsLoadedAt time.Time
+
+	routesMu       sync.RWMutex
+	routes         []BusRoute
+	routesLoadedAt time.Time
 }
 
 func New(accountKey string) *Client {
@@ -144,6 +153,34 @@ func (c *Client) Arrivals(ctx context.Context, stopCode, serviceNo string) ([]Se
 	return response.Services, nil
 }
 
+func (c *Client) ServicesAtStops(ctx context.Context, stopCodes []string) (map[string][]string, error) {
+	routes, err := c.allRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]bool, len(stopCodes))
+	for _, code := range stopCodes {
+		wanted[code] = true
+	}
+	services := make(map[string][]string, len(stopCodes))
+	seen := make(map[string]map[string]bool, len(stopCodes))
+	for _, route := range routes {
+		if !wanted[route.BusStopCode] {
+			continue
+		}
+		if seen[route.BusStopCode] == nil {
+			seen[route.BusStopCode] = make(map[string]bool)
+		}
+		serviceNo := strings.ToUpper(route.ServiceNo)
+		if seen[route.BusStopCode][serviceNo] {
+			continue
+		}
+		seen[route.BusStopCode][serviceNo] = true
+		services[route.BusStopCode] = append(services[route.BusStopCode], serviceNo)
+	}
+	return services, nil
+}
+
 func (c *Client) allStops(ctx context.Context) ([]BusStop, error) {
 	c.stopsMu.RLock()
 	if len(c.stops) > 0 && time.Since(c.stopsLoadedAt) < 24*time.Hour {
@@ -175,6 +212,39 @@ func (c *Client) allStops(ctx context.Context) ([]BusStop, error) {
 	c.stops = all
 	c.stopsLoadedAt = time.Now()
 	return append([]BusStop(nil), all...), nil
+}
+
+func (c *Client) allRoutes(ctx context.Context) ([]BusRoute, error) {
+	c.routesMu.RLock()
+	if len(c.routes) > 0 && time.Since(c.routesLoadedAt) < 24*time.Hour {
+		routes := append([]BusRoute(nil), c.routes...)
+		c.routesMu.RUnlock()
+		return routes, nil
+	}
+	c.routesMu.RUnlock()
+
+	c.routesMu.Lock()
+	defer c.routesMu.Unlock()
+	if len(c.routes) > 0 && time.Since(c.routesLoadedAt) < 24*time.Hour {
+		return append([]BusRoute(nil), c.routes...), nil
+	}
+
+	var all []BusRoute
+	for skip := 0; ; skip += 500 {
+		var response struct {
+			Value []BusRoute `json:"value"`
+		}
+		if err := c.get(ctx, "/BusRoutes", url.Values{"$skip": {strconv.Itoa(skip)}}, &response); err != nil {
+			return nil, err
+		}
+		all = append(all, response.Value...)
+		if len(response.Value) < 500 {
+			break
+		}
+	}
+	c.routes = all
+	c.routesLoadedAt = time.Now()
+	return append([]BusRoute(nil), all...), nil
 }
 
 func (c *Client) get(ctx context.Context, path string, params url.Values, dst any) error {

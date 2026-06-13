@@ -1,16 +1,17 @@
 # BusAlertBot
 
 A Telegram bot for Singapore LTA bus arrival watches. Users can keep a
-per-chat watchlist of bus stop and service pairs, start one-minute ETA updates,
-and schedule a daily 15-minute notification session.
+per-chat watchlist of bus stop and service pairs, request one-minute ETA
+updates, and schedule a daily notification prompt.
 
 ## Features
 
 - Search bus stops by name, road, or five-digit stop code.
-- Add and delete watch items with stable, auto-incrementing IDs.
+- Add and delete multi-stop, multi-service watches with stable, auto-incrementing IDs.
 - Show all watches and daily schedules with `/watchlist`.
-- Send ETA updates every minute for 15 minutes.
-- Extend any active session by another 15 minutes with an inline button.
+- Send a one-time ETA prompt manually or at a daily scheduled time.
+- Start ETA updates every minute for 15 minutes with an inline button.
+- Extend any active update session to 15 minutes from the latest button press.
 - Dismiss an active session with an inline button.
 - Deliver normal ETA updates silently.
 - Enable Telegram notification sound when the next ETA is under two minutes.
@@ -71,14 +72,23 @@ Compose deployment keeps it in a persistent named volume.
 
 ## CI/CD
 
-Every push to `main` runs the tests and vet checks, then publishes a
+Every branch push runs the tests and vet checks, then publishes a
 multi-platform image for `linux/amd64` and `linux/arm64` to GitHub Container
-Registry:
+Registry. Pushes to `main` publish:
 
 ```text
 ghcr.io/yuejunfeng0909/busalertbot:latest
 ghcr.io/yuejunfeng0909/busalertbot:<full-commit-sha>
 ```
+
+Pushes to other branches publish:
+
+```text
+ghcr.io/yuejunfeng0909/busalertbot:test-<branch-name>
+```
+
+Docker tags cannot contain `/`, so a branch such as `feature/multi-watch`
+publishes as `test-feature-multi-watch`.
 
 The workflow uses the repository's built-in `GITHUB_TOKEN`; no registry secret
 is required. New GHCR packages may initially be private. Change the package
@@ -89,7 +99,7 @@ pulls are required.
 
 ```text
 /find <name>
-/add <stop name or code> | <service>
+/add <stop[, stop...]> | <service[, service...]>
 /watchlist
 /delete <ID>
 /notify <ID>
@@ -103,14 +113,21 @@ Example:
 ```text
 /find Raffles Hotel
 /add 02049 | 36
+/add 02049, 04167 | 36, 111
 /notify 1
 /schedule 1 07:30
 ```
 
-Daily times use `TIMEZONE`, which defaults to `Asia/Singapore`. A daily
-schedule starts an ETA session immediately at the configured time and repeats
-once per minute for 15 minutes. Each ETA message provides controls to approve
-another 15 minutes or dismiss the session.
+Daily times use `TIMEZONE`, which defaults to `Asia/Singapore`. At the
+configured time, the bot sends one ETA notification with a
+`Keep notifying (15 mins)` button. Choosing it starts updates once per minute
+for 15 minutes. During active updates, choosing it again extends the session
+to 15 minutes from that click, and `Dismiss` stops the updates.
+
+Comma-separated stops and services create one watch containing the valid
+stop/service combinations reported by LTA Bus Routes. The add fails when none
+of the requested services serve the selected stops. Combined ETA results are
+sorted by the next arrival, with unavailable combinations shown last.
 
 ## Verify
 
@@ -124,6 +141,7 @@ go vet ./...
 The implementation follows LTA DataMall API User Guide 6.8:
 
 - `BusStops` for stop lookup.
+- `BusRoutes` for validating stop and service combinations.
 - `v3/BusArrival` for real-time ETA data.
 
 Telegram integration uses HTTPS long polling through the official Bot API.
