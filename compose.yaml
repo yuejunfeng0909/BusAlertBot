@@ -1,7 +1,14 @@
 services:
-  bot:
-    build: .
+  busalertbot:
+    container_name: busalertbot
+    image: ghcr.io/yuejunfeng0909/busalertbot:latest
+    pull_policy: always
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: true
     volumes:
-      - ./data:/app/data
+      - busalertbot-data:/app/data
+
+volumes:
+  busalertbot-data:

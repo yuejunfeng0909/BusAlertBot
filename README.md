@@ -42,13 +42,19 @@ or Docker Compose to provide them.
 With Docker Compose:
 
 ```sh
-docker compose up --build -d
+cp .env.example .env
+# Set TELEGRAM_BOT_TOKEN and LTA_ACCOUNT_KEY in .env.
+docker compose up -d
 ```
 
-Pull the image published from the `main` branch:
+The included `compose.yaml` pulls the latest published image from GHCR and
+stores bot state in the Docker-managed `busalertbot-data` volume. The `.env`
+file must be in the same directory as `compose.yaml`.
+
+To inspect the service:
 
 ```sh
-docker pull ghcr.io/yuejunfeng0909/busalertbot:latest
+docker compose logs -f
 ```
 
 Directly:
@@ -60,8 +66,8 @@ set +a
 go run ./cmd/busalertbot
 ```
 
-State is stored in `data/state.json` by default. Keep that directory on a
-persistent volume in production.
+State is stored in `/app/data/state.json` in the container by default. The
+Compose deployment keeps it in a persistent named volume.
 
 ## CI/CD
 
