@@ -99,6 +99,14 @@ func (c *Client) AnswerCallback(ctx context.Context, callbackID, text string) er
 	}, nil)
 }
 
+func (c *Client) EditMessageReplyMarkup(ctx context.Context, chatID, messageID int64, keyboard *InlineKeyboardMarkup) error {
+	return c.call(ctx, "editMessageReplyMarkup", map[string]any{
+		"chat_id":      chatID,
+		"message_id":   messageID,
+		"reply_markup": keyboard,
+	}, nil)
+}
+
 func (c *Client) SetCommands(ctx context.Context, commands []BotCommand) error {
 	return c.call(ctx, "setMyCommands", map[string]any{"commands": commands}, nil)
 }

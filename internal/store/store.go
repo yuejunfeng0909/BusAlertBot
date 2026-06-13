@@ -19,15 +19,21 @@ var (
 )
 
 type Watch struct {
-	ID            int         `json:"id"`
-	Stops         []WatchStop `json:"stops,omitempty"`
-	ServiceNos    []string    `json:"service_nos,omitempty"`
-	StopCode      string      `json:"stop_code,omitempty"`
-	StopName      string      `json:"stop_name,omitempty"`
-	RoadName      string      `json:"road_name,omitempty"`
-	ServiceNo     string      `json:"service_no,omitempty"`
-	Schedule      string      `json:"schedule,omitempty"`
-	LastTriggered string      `json:"last_triggered,omitempty"`
+	ID            int                `json:"id"`
+	Stops         []WatchStop        `json:"stops,omitempty"`
+	ServiceNos    []string           `json:"service_nos,omitempty"`
+	Combinations  []WatchCombination `json:"combinations,omitempty"`
+	StopCode      string             `json:"stop_code,omitempty"`
+	StopName      string             `json:"stop_name,omitempty"`
+	RoadName      string             `json:"road_name,omitempty"`
+	ServiceNo     string             `json:"service_no,omitempty"`
+	Schedule      string             `json:"schedule,omitempty"`
+	LastTriggered string             `json:"last_triggered,omitempty"`
+}
+
+type WatchCombination struct {
+	StopCode  string `json:"stop_code"`
+	ServiceNo string `json:"service_no"`
 }
 
 type WatchStop struct {
@@ -247,6 +253,16 @@ func normalizeWatch(watch *Watch) {
 	if len(watch.ServiceNos) == 0 && watch.ServiceNo != "" {
 		watch.ServiceNos = []string{strings.ToUpper(watch.ServiceNo)}
 	}
+	if len(watch.Combinations) == 0 {
+		for _, stop := range watch.Stops {
+			for _, serviceNo := range watch.ServiceNos {
+				watch.Combinations = append(watch.Combinations, WatchCombination{
+					StopCode:  stop.Code,
+					ServiceNo: strings.ToUpper(serviceNo),
+				})
+			}
+		}
+	}
 	watch.StopCode = ""
 	watch.StopName = ""
 	watch.RoadName = ""
@@ -256,28 +272,23 @@ func normalizeWatch(watch *Watch) {
 func sameWatch(left, right Watch) bool {
 	normalizeWatch(&left)
 	normalizeWatch(&right)
-	if len(left.Stops) != len(right.Stops) || len(left.ServiceNos) != len(right.ServiceNos) {
+	if len(left.Combinations) != len(right.Combinations) {
 		return false
 	}
-	rightStops := make(map[string]bool, len(right.Stops))
-	for _, stop := range right.Stops {
-		rightStops[stop.Code] = true
+	rightCombinations := make(map[string]bool, len(right.Combinations))
+	for _, combination := range right.Combinations {
+		rightCombinations[combinationKey(combination)] = true
 	}
-	for _, stop := range left.Stops {
-		if !rightStops[stop.Code] {
-			return false
-		}
-	}
-	rightServices := make(map[string]bool, len(right.ServiceNos))
-	for _, service := range right.ServiceNos {
-		rightServices[strings.ToUpper(service)] = true
-	}
-	for _, service := range left.ServiceNos {
-		if !rightServices[strings.ToUpper(service)] {
+	for _, combination := range left.Combinations {
+		if !rightCombinations[combinationKey(combination)] {
 			return false
 		}
 	}
 	return true
+}
+
+func combinationKey(combination WatchCombination) string {
+	return combination.StopCode + "\x00" + strings.ToUpper(combination.ServiceNo)
 }
 
 func (s *Store) saveLocked() error {

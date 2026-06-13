@@ -59,6 +59,37 @@ func TestArrivalsUsesV3EndpointAndFiltersService(t *testing.T) {
 	}
 }
 
+func TestServicesAtStopsUsesBusRoutesAndDeduplicatesServices(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/BusRoutes" {
+			t.Errorf("path = %q, want /BusRoutes", r.URL.Path)
+		}
+		if r.URL.Query().Get("$skip") != "0" {
+			t.Errorf("$skip = %q, want 0", r.URL.Query().Get("$skip"))
+		}
+		return jsonResponse(map[string]any{
+			"value": []BusRoute{
+				{ServiceNo: "36", BusStopCode: "02049"},
+				{ServiceNo: "36", BusStopCode: "02049"},
+				{ServiceNo: "111", BusStopCode: "04167"},
+				{ServiceNo: "7", BusStopCode: "01019"},
+			},
+		}), nil
+	})}
+
+	client := NewWithBaseURL("secret", "https://lta.test", httpClient)
+	services, err := client.ServicesAtStops(context.Background(), []string{"02049", "04167"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services["02049"]) != 1 || services["02049"][0] != "36" {
+		t.Fatalf("02049 services = %#v", services["02049"])
+	}
+	if len(services["04167"]) != 1 || services["04167"][0] != "111" {
+		t.Fatalf("04167 services = %#v", services["04167"])
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

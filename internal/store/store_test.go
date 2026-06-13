@@ -125,4 +125,7 @@ func TestOpenMigratesLegacySingleStopWatch(t *testing.T) {
 	if len(watch.ServiceNos) != 1 || watch.ServiceNos[0] != "36" {
 		t.Fatalf("service numbers = %#v", watch.ServiceNos)
 	}
+	if len(watch.Combinations) != 1 || watch.Combinations[0].StopCode != "02049" || watch.Combinations[0].ServiceNo != "36" {
+		t.Fatalf("combinations = %#v", watch.Combinations)
+	}
 }
