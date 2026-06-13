@@ -45,6 +45,12 @@ With Docker Compose:
 docker compose up --build -d
 ```
 
+Pull the image published from the `main` branch:
+
+```sh
+docker pull ghcr.io/yuejunfeng0909/busalertbot:latest
+```
+
 Directly:
 
 ```sh
@@ -56,6 +62,22 @@ go run ./cmd/busalertbot
 
 State is stored in `data/state.json` by default. Keep that directory on a
 persistent volume in production.
+
+## CI/CD
+
+Every push to `main` runs the tests and vet checks, then publishes a
+multi-platform image for `linux/amd64` and `linux/arm64` to GitHub Container
+Registry:
+
+```text
+ghcr.io/yuejunfeng0909/busalertbot:latest
+ghcr.io/yuejunfeng0909/busalertbot:<full-commit-sha>
+```
+
+The workflow uses the repository's built-in `GITHUB_TOKEN`; no registry secret
+is required. New GHCR packages may initially be private. Change the package
+visibility in the repository owner's GitHub package settings if anonymous
+pulls are required.
 
 ## Commands
 
