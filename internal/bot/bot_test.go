@@ -1,14 +1,176 @@
 package bot
 
 import (
+	"context"
+	"errors"
 	"log/slog"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"busalertbot/internal/lta"
 	"busalertbot/internal/store"
+	"busalertbot/internal/telegram"
 )
+
+type sentMessage struct {
+	text     string
+	keyboard *telegram.InlineKeyboardMarkup
+}
+
+type fakeTelegramClient struct {
+	messages []sentMessage
+	answers  []string
+	edits    []*telegram.InlineKeyboardMarkup
+}
+
+func (f *fakeTelegramClient) GetUpdates(context.Context, int64, time.Duration) ([]telegram.Update, error) {
+	return nil, nil
+}
+
+func (f *fakeTelegramClient) SendMessage(_ context.Context, _ int64, text string, _ bool, keyboard *telegram.InlineKeyboardMarkup) error {
+	f.messages = append(f.messages, sentMessage{text: text, keyboard: keyboard})
+	return nil
+}
+
+func (f *fakeTelegramClient) AnswerCallback(_ context.Context, _, text string) error {
+	f.answers = append(f.answers, text)
+	return nil
+}
+
+func (f *fakeTelegramClient) EditMessageReplyMarkup(_ context.Context, _, _ int64, keyboard *telegram.InlineKeyboardMarkup) error {
+	f.edits = append(f.edits, keyboard)
+	return nil
+}
+
+func (f *fakeTelegramClient) SetCommands(context.Context, []telegram.BotCommand) error {
+	return nil
+}
+
+type fakeLTAClient struct{}
+
+func (fakeLTAClient) SearchStops(context.Context, string, int) ([]lta.BusStop, error) {
+	return nil, nil
+}
+
+func (fakeLTAClient) Arrivals(context.Context, string, string) ([]lta.ServiceArrival, error) {
+	return nil, nil
+}
+
+func (fakeLTAClient) ServicesAtStops(context.Context, []string) (map[string][]string, error) {
+	return nil, nil
+}
+
+func newTestBot(t *testing.T) (*Bot, *store.Store, *fakeTelegramClient) {
+	t.Helper()
+	data, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeTelegramClient{}
+	return New(slog.Default(), data, fakeLTAClient{}, client, time.UTC, time.Second), data, client
+}
+
+func addTestWatch(t *testing.T, data *store.Store, chatID int64) store.Watch {
+	t.Helper()
+	watch, err := data.Add(chatID, store.Watch{
+		Stops:        []store.WatchStop{{Code: "02049", Name: "Raffles Hotel"}},
+		ServiceNos:   []string{"36"},
+		Combinations: []store.WatchCombination{{StopCode: "02049", ServiceNo: "36"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return watch
+}
+
+func TestArgumentlessWatchCommandsShowWatchChoices(t *testing.T) {
+	b, data, client := newTestBot(t)
+	const chatID int64 = 42
+	watch := addTestWatch(t, data, chatID)
+
+	tests := []struct {
+		name   string
+		action string
+		call   func()
+	}{
+		{name: "delete", action: "delete", call: func() { b.handleDelete(context.Background(), chatID, "") }},
+		{name: "notify", action: "notify", call: func() { b.handleNotify(context.Background(), chatID, "  ") }},
+		{name: "unschedule", action: "unschedule", call: func() { b.handleUnschedule(context.Background(), chatID, "") }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client.messages = nil
+			test.call()
+			if len(client.messages) != 1 {
+				t.Fatalf("sent %d messages, want 1", len(client.messages))
+			}
+			keyboard := client.messages[0].keyboard
+			if keyboard == nil || len(keyboard.InlineKeyboard) != 1 || len(keyboard.InlineKeyboard[0]) != 1 {
+				t.Fatalf("keyboard = %#v", keyboard)
+			}
+			button := keyboard.InlineKeyboard[0][0]
+			if button.Text != "#1 Bus 36 at Raffles Hotel" {
+				t.Fatalf("button text = %q", button.Text)
+			}
+			wantCallback := test.action + ":" + strconv.Itoa(watch.ID)
+			if button.CallbackData != wantCallback {
+				t.Fatalf("callback data = %q, want %q", button.CallbackData, wantCallback)
+			}
+		})
+	}
+}
+
+func TestWatchSelectionCallbacksPerformActions(t *testing.T) {
+	b, data, client := newTestBot(t)
+	const chatID int64 = 42
+
+	unscheduled := addTestWatch(t, data, chatID)
+	if _, err := data.SetSchedule(chatID, unscheduled.ID, "07:30"); err != nil {
+		t.Fatal(err)
+	}
+	b.handleCallback(context.Background(), &telegram.CallbackQuery{
+		ID:   "unschedule-callback",
+		Data: "unschedule:1",
+		Message: &telegram.Message{
+			MessageID: 10,
+			Chat:      telegram.Chat{ID: chatID},
+		},
+	})
+	updated, err := data.Get(chatID, unscheduled.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Schedule != "" {
+		t.Fatalf("schedule = %q, want empty", updated.Schedule)
+	}
+
+	b.handleCallback(context.Background(), &telegram.CallbackQuery{
+		ID:   "notify-callback",
+		Data: "notify:1",
+		Message: &telegram.Message{
+			MessageID: 11,
+			Chat:      telegram.Chat{ID: chatID},
+		},
+	})
+	if len(client.messages) < 2 || !strings.Contains(client.messages[len(client.messages)-1].text, "Watch #1 ETAs:") {
+		t.Fatalf("messages = %#v", client.messages)
+	}
+
+	b.handleCallback(context.Background(), &telegram.CallbackQuery{
+		ID:   "delete-callback",
+		Data: "delete:1",
+		Message: &telegram.Message{
+			MessageID: 12,
+			Chat:      telegram.Chat{ID: chatID},
+		},
+	})
+	if _, err := data.Get(chatID, unscheduled.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("get deleted watch error = %v, want ErrNotFound", err)
+	}
+}
 
 func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
 	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.FixedZone("SGT", 8*60*60))

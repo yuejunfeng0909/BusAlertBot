@@ -235,6 +235,10 @@ func (b *Bot) handleWatchlist(ctx context.Context, chatID int64) {
 }
 
 func (b *Bot) handleDelete(ctx context.Context, chatID int64, args string) {
+	if strings.TrimSpace(args) == "" {
+		b.promptWatchSelection(ctx, chatID, "delete", "Choose a watch to delete:")
+		return
+	}
 	id, ok := parseID(args)
 	if !ok {
 		b.send(ctx, chatID, "Usage: /delete <watch ID>", false, nil)
@@ -252,6 +256,10 @@ func (b *Bot) handleDelete(ctx context.Context, chatID int64, args string) {
 }
 
 func (b *Bot) handleNotify(ctx context.Context, chatID int64, args string) {
+	if strings.TrimSpace(args) == "" {
+		b.promptWatchSelection(ctx, chatID, "notify", "Choose a watch for ETA notifications:")
+		return
+	}
 	id, ok := parseID(args)
 	if !ok {
 		b.send(ctx, chatID, "Usage: /notify <watch ID>", false, nil)
@@ -299,6 +307,10 @@ func (b *Bot) handleSchedule(ctx context.Context, chatID int64, args string) {
 }
 
 func (b *Bot) handleUnschedule(ctx context.Context, chatID int64, args string) {
+	if strings.TrimSpace(args) == "" {
+		b.promptWatchSelection(ctx, chatID, "unschedule", "Choose a watch to unschedule:")
+		return
+	}
 	id, ok := parseID(args)
 	if !ok {
 		b.send(ctx, chatID, "Usage: /unschedule <watch ID>", false, nil)
@@ -337,6 +349,35 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 		return
 	}
 	switch parts[0] {
+	case "delete":
+		if err := b.store.Delete(chatID, id); err != nil {
+			b.fail(chatID, "delete watch item", err)
+			b.answer(ctx, callback.ID, "Could not delete that watch.")
+			return
+		}
+		b.dismiss(chatID, id)
+		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
+		b.send(ctx, chatID, fmt.Sprintf("Deleted watch #%d.", id), false, nil)
+		b.answer(ctx, callback.ID, "Watch deleted.")
+	case "notify":
+		watch, err := b.store.Get(chatID, id)
+		if err != nil {
+			b.fail(chatID, "load watch item", err)
+			b.answer(ctx, callback.ID, "Could not load that watch.")
+			return
+		}
+		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
+		b.answer(ctx, callback.ID, "Fetching ETAs.")
+		b.sendETA(ctx, chatID, watch, false)
+	case "unschedule":
+		if _, err := b.store.SetSchedule(chatID, id, ""); err != nil {
+			b.fail(chatID, "remove schedule", err)
+			b.answer(ctx, callback.ID, "Could not remove that schedule.")
+			return
+		}
+		b.editKeyboard(ctx, chatID, callback.Message.MessageID, nil)
+		b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from watch #%d.", id), false, nil)
+		b.answer(ctx, callback.ID, "Schedule removed.")
 	case "keep", "continue":
 		b.activate(chatID, id, time.Now())
 		b.editKeyboard(ctx, chatID, callback.Message.MessageID, notificationKeyboard(id, true))
@@ -348,6 +389,15 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 	default:
 		b.answer(ctx, callback.ID, "Invalid action.")
 	}
+}
+
+func (b *Bot) promptWatchSelection(ctx context.Context, chatID int64, action, prompt string) {
+	watches := b.store.List(chatID)
+	if len(watches) == 0 {
+		b.send(ctx, chatID, "Your watchlist is empty. Add one with /add <stop> | <service>.", false, nil)
+		return
+	}
+	b.send(ctx, chatID, prompt, false, watchSelectionKeyboard(action, watches))
 }
 
 func (b *Bot) runScheduler(ctx context.Context) {
@@ -730,6 +780,39 @@ func notificationKeyboard(watchID int, active bool) *telegram.InlineKeyboardMark
 	return &telegram.InlineKeyboardMarkup{
 		InlineKeyboard: [][]telegram.InlineKeyboardButton{buttons},
 	}
+}
+
+func watchSelectionKeyboard(action string, watches []store.Watch) *telegram.InlineKeyboardMarkup {
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(watches))
+	for _, watch := range watches {
+		rows = append(rows, []telegram.InlineKeyboardButton{{
+			Text:         watchSelectionLabel(watch),
+			CallbackData: fmt.Sprintf("%s:%d", action, watch.ID),
+		}})
+	}
+	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func watchSelectionLabel(watch store.Watch) string {
+	combinations := watchCombinations(watch)
+	if len(combinations) == 0 {
+		return fmt.Sprintf("#%d", watch.ID)
+	}
+	stopsByCode := make(map[string]store.WatchStop, len(watch.Stops))
+	for _, stop := range watch.Stops {
+		stopsByCode[stop.Code] = stop
+	}
+	first := combinations[0]
+	stop := stopsByCode[first.StopCode]
+	stopName := stop.Name
+	if stopName == "" {
+		stopName = first.StopCode
+	}
+	label := fmt.Sprintf("#%d Bus %s at %s", watch.ID, first.ServiceNo, stopName)
+	if len(combinations) > 1 {
+		label += fmt.Sprintf(" +%d", len(combinations)-1)
+	}
+	return label
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) bool {
