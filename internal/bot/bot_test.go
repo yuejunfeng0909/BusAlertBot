@@ -116,7 +116,7 @@ func TestArgumentlessWatchCommandsShowWatchChoices(t *testing.T) {
 				t.Fatalf("keyboard = %#v", keyboard)
 			}
 			button := keyboard.InlineKeyboard[0][0]
-			if button.Text != "#1 (home) Bus 36 at Raffles Hotel" {
+			if button.Text != "home Bus 36 at Raffles Hotel" {
 				t.Fatalf("button text = %q", button.Text)
 			}
 			wantCallback := test.action + ":" + strconv.Itoa(watch.ID)
@@ -124,6 +124,21 @@ func TestArgumentlessWatchCommandsShowWatchChoices(t *testing.T) {
 				t.Fatalf("callback data = %q, want %q", button.CallbackData, wantCallback)
 			}
 		})
+	}
+}
+
+func TestAliasConfirmationHidesWatchID(t *testing.T) {
+	b, data, client := newTestBot(t)
+	const chatID int64 = 42
+	addTestWatch(t, data, chatID)
+
+	b.handleAlias(context.Background(), chatID, "1 home")
+
+	if len(client.messages) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(client.messages))
+	}
+	if got := client.messages[0].text; got != `You can now refer to this watch as "home".` {
+		t.Fatalf("message = %q", got)
 	}
 }
 
@@ -245,7 +260,10 @@ func TestValidAlias(t *testing.T) {
 }
 
 func TestWatchLabelIncludesAlias(t *testing.T) {
-	if got := watchLabel(store.Watch{ID: 3, Alias: "home"}); got != "Watch #3 (home)" {
+	if got := watchLabel(store.Watch{ID: 3, Alias: "home"}); got != "Watch home" {
+		t.Fatalf("watchLabel() = %q", got)
+	}
+	if got := watchLabel(store.Watch{ID: 3}); got != "Watch #3" {
 		t.Fatalf("watchLabel() = %q", got)
 	}
 }

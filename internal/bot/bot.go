@@ -264,7 +264,7 @@ func (b *Bot) handleAlias(ctx context.Context, chatID int64, args string) {
 		b.fail(chatID, "save watch alias", err)
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Watch #%d can now be referred to as %q.", watch.ID, watch.Alias), false, nil)
+	b.send(ctx, chatID, fmt.Sprintf("You can now refer to this watch as %q.", watch.Alias), false, nil)
 }
 
 func (b *Bot) handleDelete(ctx context.Context, chatID int64, args string) {
@@ -785,7 +785,7 @@ func watchLabel(watch store.Watch) string {
 	if watch.Alias == "" {
 		return fmt.Sprintf("Watch #%d", watch.ID)
 	}
-	return fmt.Sprintf("Watch #%d (%s)", watch.ID, watch.Alias)
+	return fmt.Sprintf("Watch %s", watch.Alias)
 }
 
 func writeWatchCombinations(text *strings.Builder, watch store.Watch) {
@@ -877,9 +877,9 @@ func watchSelectionLabel(watch store.Watch) string {
 	if stopName == "" {
 		stopName = first.StopCode
 	}
-	label := fmt.Sprintf("#%d", watch.ID)
-	if watch.Alias != "" {
-		label += fmt.Sprintf(" (%s)", watch.Alias)
+	label := watch.Alias
+	if label == "" {
+		label = fmt.Sprintf("#%d", watch.ID)
 	}
 	label += fmt.Sprintf(" Bus %s at %s", first.ServiceNo, stopName)
 	if len(combinations) > 1 {
