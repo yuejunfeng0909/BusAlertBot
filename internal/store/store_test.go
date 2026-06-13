@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -170,6 +171,58 @@ func TestClaimDueOnlyOncePerMinute(t *testing.T) {
 	}
 }
 
+func TestClaimDueIsAtomicAcrossStoreInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	watch, err := first.Add(99, Watch{StopCode: "02049", ServiceNo: "36"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.SetSchedule(99, watch.ID, "07:30"); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, time.June, 13, 7, 30, 5, 0, time.FixedZone("SGT", 8*60*60))
+	results := make(chan []DueWatch, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, data := range []*Store{first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			due, err := data.ClaimDue(now)
+			results <- due
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var claimed int
+	for due := range results {
+		claimed += len(due)
+	}
+	if claimed != 1 {
+		t.Fatalf("claimed %d watches across two stores, want 1", claimed)
+	}
+}
+
 func TestOpenMigratesLegacySingleStopWatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	legacy := `{"users":{"42":{"next_id":2,"watches":[{"id":1,"stop_code":"02049","stop_name":"Raffles Hotel","road_name":"Bras Basah Rd","service_no":"36"}]}}}`
@@ -193,5 +246,11 @@ func TestOpenMigratesLegacySingleStopWatch(t *testing.T) {
 	}
 	if len(watch.Combinations) != 1 || watch.Combinations[0].StopCode != "02049" || watch.Combinations[0].ServiceNo != "36" {
 		t.Fatalf("combinations = %#v", watch.Combinations)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy state still exists: %v", err)
+	}
+	if _, err := os.Stat(path + ".migrated"); err != nil {
+		t.Fatalf("archived legacy state: %v", err)
 	}
 }

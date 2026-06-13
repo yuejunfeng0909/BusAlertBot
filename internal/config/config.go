@@ -20,7 +20,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		TelegramToken: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		LTAAccountKey: strings.TrimSpace(os.Getenv("LTA_ACCOUNT_KEY")),
-		DataFile:      envOr("DATA_FILE", "data/state.json"),
+		DataFile:      envOr("DATA_FILE", "data/state.db"),
 		Timezone:      envOr("TIMEZONE", "Asia/Singapore"),
 		PollTimeout:   50 * time.Second,
 	}
