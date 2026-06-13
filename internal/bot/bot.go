@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,40 +127,53 @@ func (b *Bot) handleMessage(ctx context.Context, message *telegram.Message) {
 }
 
 func (b *Bot) handleAdd(ctx context.Context, chatID int64, args string) {
-	stopQuery, serviceNo, ok := parseAddArgs(args)
+	stopQueries, serviceNos, ok := parseAddArgs(args)
 	if !ok {
-		b.send(ctx, chatID, "Usage: /add <bus stop name or 5-digit code> | <service>\nExample: /add Raffles Hotel | 36", false, nil)
+		b.send(ctx, chatID, "Usage: /add <stop[, stop...]> | <service[, service...]>\nExample: /add 02049, 04167 | 36, 111", false, nil)
 		return
 	}
-	stops, err := b.lta.SearchStops(ctx, stopQuery, 6)
-	if err != nil {
-		b.fail(chatID, "search bus stops", err)
-		return
+
+	watchStops := make([]store.WatchStop, 0, len(stopQueries))
+	seenStopCodes := make(map[string]bool)
+	for _, stopQuery := range stopQueries {
+		stops, err := b.lta.SearchStops(ctx, stopQuery, 6)
+		if err != nil {
+			b.fail(chatID, "search bus stops", err)
+			return
+		}
+		if len(stops) == 0 {
+			b.send(ctx, chatID, fmt.Sprintf("No bus stop matched %q. Try /find <name>.", stopQuery), false, nil)
+			return
+		}
+		if len(stops) > 1 && !strings.EqualFold(stops[0].Description, stopQuery) && stops[0].BusStopCode != stopQuery {
+			b.send(ctx, chatID, fmt.Sprintf("More than one stop matched %q.\n\n%s", stopQuery, formatStopMatches(stops)), false, nil)
+			return
+		}
+		stop := stops[0]
+		if seenStopCodes[stop.BusStopCode] {
+			continue
+		}
+		seenStopCodes[stop.BusStopCode] = true
+		watchStops = append(watchStops, store.WatchStop{
+			Code:     stop.BusStopCode,
+			Name:     stop.Description,
+			RoadName: stop.RoadName,
+		})
 	}
-	if len(stops) == 0 {
-		b.send(ctx, chatID, "No bus stop matched that name or code. Try /find <name>.", false, nil)
-		return
-	}
-	if len(stops) > 1 && !strings.EqualFold(stops[0].Description, stopQuery) && stops[0].BusStopCode != stopQuery {
-		b.send(ctx, chatID, formatStopMatches(stops), false, nil)
-		return
-	}
-	stop := stops[0]
+
 	watch, err := b.store.Add(chatID, store.Watch{
-		StopCode:  stop.BusStopCode,
-		StopName:  stop.Description,
-		RoadName:  stop.RoadName,
-		ServiceNo: serviceNo,
+		Stops:      watchStops,
+		ServiceNos: serviceNos,
 	})
 	if errors.Is(err, store.ErrDuplicate) {
-		b.send(ctx, chatID, "That stop and service are already on your watchlist.", false, nil)
+		b.send(ctx, chatID, "That combination of stops and services is already on your watchlist.", false, nil)
 		return
 	}
 	if err != nil {
 		b.fail(chatID, "save watch item", err)
 		return
 	}
-	b.send(ctx, chatID, fmt.Sprintf("Added #%d: bus %s at %s (%s).", watch.ID, watch.ServiceNo, watch.StopName, watch.StopCode), false, nil)
+	b.send(ctx, chatID, formatAddedWatch(watch), false, nil)
 }
 
 func (b *Bot) handleFind(ctx context.Context, chatID int64, args string) {
@@ -188,7 +202,10 @@ func (b *Bot) handleWatchlist(ctx context.Context, chatID int64) {
 	var text strings.Builder
 	text.WriteString("Your watchlist:\n")
 	for _, watch := range watches {
-		fmt.Fprintf(&text, "\n#%d  Bus %s\n%s (%s)", watch.ID, watch.ServiceNo, watch.StopName, watch.StopCode)
+		fmt.Fprintf(&text, "\n#%d  Buses %s", watch.ID, strings.Join(watch.ServiceNos, ", "))
+		for _, stop := range watch.Stops {
+			fmt.Fprintf(&text, "\n%s (%s)", stop.Name, stop.Code)
+		}
 		if watch.Schedule != "" {
 			fmt.Fprintf(&text, "\nDaily: %s", watch.Schedule)
 		}
@@ -347,14 +364,17 @@ func (b *Bot) runScheduler(ctx context.Context) {
 }
 
 func (b *Bot) sendETA(ctx context.Context, chatID int64, watch store.Watch) {
-	arrivals, err := b.lta.Arrivals(ctx, watch.StopCode, watch.ServiceNo)
-	if err != nil {
-		b.log.Error("fetch bus arrivals", "chat_id", chatID, "watch_id", watch.ID, "error", err)
-		b.send(ctx, chatID, fmt.Sprintf("Watch #%d: ETA is temporarily unavailable.", watch.ID), true, sessionKeyboard(watch.ID))
-		return
+	arrivalsByStop := make(map[string][]lta.ServiceArrival, len(watch.Stops))
+	for _, stop := range watch.Stops {
+		arrivals, err := b.lta.Arrivals(ctx, stop.Code, "")
+		if err != nil {
+			b.log.Error("fetch bus arrivals", "chat_id", chatID, "watch_id", watch.ID, "stop_code", stop.Code, "error", err)
+			continue
+		}
+		arrivalsByStop[stop.Code] = arrivals
 	}
 	now := time.Now()
-	text, urgent := formatETA(watch, arrivals, now)
+	text, urgent := formatETA(watch, arrivalsByStop, now)
 	b.send(ctx, chatID, text, !urgent, sessionKeyboard(watch.ID))
 }
 
@@ -435,17 +455,40 @@ func splitCommand(text string) (string, string) {
 	return command, args
 }
 
-func parseAddArgs(args string) (string, string, bool) {
+func parseAddArgs(args string) ([]string, []string, bool) {
 	parts := strings.SplitN(args, "|", 2)
 	if len(parts) != 2 {
-		return "", "", false
+		return nil, nil, false
 	}
-	stop := strings.TrimSpace(parts[0])
-	service := strings.ToUpper(strings.TrimSpace(parts[1]))
-	if stop == "" || !validServiceNo(service) {
-		return "", "", false
+	stops := splitUnique(parts[0], false)
+	services := splitUnique(parts[1], true)
+	if len(stops) == 0 || len(services) == 0 {
+		return nil, nil, false
 	}
-	return stop, service, true
+	for _, service := range services {
+		if !validServiceNo(service) {
+			return nil, nil, false
+		}
+	}
+	return stops, services, true
+}
+
+func splitUnique(value string, upper bool) []string {
+	var result []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if upper {
+			part = strings.ToUpper(part)
+		}
+		key := strings.ToUpper(part)
+		if part == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, part)
+	}
+	return result
 }
 
 func validServiceNo(service string) bool {
@@ -471,48 +514,89 @@ func formatStopMatches(stops []lta.BusStop) string {
 	for _, stop := range stops {
 		fmt.Fprintf(&text, "\n%s - %s, %s", stop.BusStopCode, stop.Description, stop.RoadName)
 	}
-	text.WriteString("\n\nAdd one with /add <code> | <service>.")
+	text.WriteString("\n\nAdd with /add <code[, code...]> | <service[, service...]>.")
 	return text.String()
 }
 
-func formatETA(watch store.Watch, services []lta.ServiceArrival, now time.Time) (string, bool) {
-	var selected *lta.ServiceArrival
-	for i := range services {
-		if strings.EqualFold(services[i].ServiceNo, watch.ServiceNo) {
-			selected = &services[i]
-			break
-		}
-	}
-	header := fmt.Sprintf("Watch #%d: bus %s at %s (%s)", watch.ID, watch.ServiceNo, watch.StopName, watch.StopCode)
-	if selected == nil {
-		return header + "\nNo ETA available.", false
-	}
+type etaResult struct {
+	stop        store.WatchStop
+	serviceNo   string
+	arrivals    []lta.Arrival
+	firstETA    time.Time
+	hasFirstETA bool
+}
 
-	buses := []lta.Arrival{selected.NextBus, selected.NextBus2, selected.NextBus3}
-	var labels []string
+func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival, now time.Time) (string, bool) {
+	results := make([]etaResult, 0, len(watch.Stops)*len(watch.ServiceNos))
+	for _, stop := range watch.Stops {
+		services := arrivalsByStop[stop.Code]
+		for _, serviceNo := range watch.ServiceNos {
+			result := etaResult{stop: stop, serviceNo: serviceNo}
+			for i := range services {
+				if !strings.EqualFold(services[i].ServiceNo, serviceNo) {
+					continue
+				}
+				result.arrivals = []lta.Arrival{services[i].NextBus, services[i].NextBus2, services[i].NextBus3}
+				for _, arrival := range result.arrivals {
+					parsed, err := time.Parse(time.RFC3339, arrival.EstimatedArrival)
+					if err == nil {
+						result.firstETA = parsed
+						result.hasFirstETA = true
+						break
+					}
+				}
+				break
+			}
+			results = append(results, result)
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].hasFirstETA != results[j].hasFirstETA {
+			return results[i].hasFirstETA
+		}
+		if !results[i].hasFirstETA {
+			return false
+		}
+		return results[i].firstETA.Before(results[j].firstETA)
+	})
+
+	var text strings.Builder
+	fmt.Fprintf(&text, "Watch #%d ETAs:", watch.ID)
 	urgent := false
-	for _, bus := range buses {
-		if bus.EstimatedArrival == "" {
-			continue
+	for _, result := range results {
+		var labels []string
+		for _, bus := range result.arrivals {
+			arrivalTime, err := time.Parse(time.RFC3339, bus.EstimatedArrival)
+			if err != nil {
+				continue
+			}
+			remaining := arrivalTime.Sub(now)
+			if remaining < 2*time.Minute {
+				urgent = true
+			}
+			label := durationLabel(remaining)
+			if load := loadLabel(bus.Load); load != "" {
+				label += " (" + load + ")"
+			}
+			labels = append(labels, label)
 		}
-		arrivalTime, err := time.Parse(time.RFC3339, bus.EstimatedArrival)
-		if err != nil {
-			continue
+		fmt.Fprintf(&text, "\n\nBus %s at %s (%s)\n", result.serviceNo, result.stop.Name, result.stop.Code)
+		if len(labels) == 0 {
+			text.WriteString("No ETA available.")
+		} else {
+			text.WriteString("ETA: " + strings.Join(labels, ", "))
 		}
-		remaining := arrivalTime.Sub(now)
-		if remaining < 2*time.Minute {
-			urgent = true
-		}
-		label := durationLabel(remaining)
-		if load := loadLabel(bus.Load); load != "" {
-			label += " (" + load + ")"
-		}
-		labels = append(labels, label)
 	}
-	if len(labels) == 0 {
-		return header + "\nNo ETA available.", false
+	return text.String(), urgent
+}
+
+func formatAddedWatch(watch store.Watch) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "Added watch #%d for buses %s at:", watch.ID, strings.Join(watch.ServiceNos, ", "))
+	for _, stop := range watch.Stops {
+		fmt.Fprintf(&text, "\n%s (%s)", stop.Name, stop.Code)
 	}
-	return header + "\nETA: " + strings.Join(labels, ", "), urgent
+	return text.String()
 }
 
 func durationLabel(duration time.Duration) string {
@@ -558,11 +642,13 @@ func sleepContext(ctx context.Context, duration time.Duration) bool {
 const helpText = `Bus ETA watchlist
 
 /find <name> - find bus stop codes
-/add <stop name or code> | <service> - add a watch
+/add <stop[, stop...]> | <service[, service...]> - add a watch
 /watchlist - list watches and IDs
 /delete <ID> - delete a watch
 /notify <ID> - start ETA updates every minute for 15 minutes
 /schedule <ID> <HH:MM> - start a 15-minute session daily
 /unschedule <ID> - remove a daily schedule
+
+Multiple stops and services form every stop/service combination. Combined ETA results are sorted by the next arrival.
 
 Each ETA message includes buttons to approve another 15 minutes or dismiss updates. Notifications are silent unless the next bus is less than 2 minutes away.`

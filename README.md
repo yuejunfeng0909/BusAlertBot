@@ -7,7 +7,7 @@ and schedule a daily 15-minute notification session.
 ## Features
 
 - Search bus stops by name, road, or five-digit stop code.
-- Add and delete watch items with stable, auto-incrementing IDs.
+- Add and delete multi-stop, multi-service watches with stable, auto-incrementing IDs.
 - Show all watches and daily schedules with `/watchlist`.
 - Send ETA updates every minute for 15 minutes.
 - Extend any active session by another 15 minutes with an inline button.
@@ -71,14 +71,23 @@ Compose deployment keeps it in a persistent named volume.
 
 ## CI/CD
 
-Every push to `main` runs the tests and vet checks, then publishes a
+Every branch push runs the tests and vet checks, then publishes a
 multi-platform image for `linux/amd64` and `linux/arm64` to GitHub Container
-Registry:
+Registry. Pushes to `main` publish:
 
 ```text
 ghcr.io/yuejunfeng0909/busalertbot:latest
 ghcr.io/yuejunfeng0909/busalertbot:<full-commit-sha>
 ```
+
+Pushes to other branches publish:
+
+```text
+ghcr.io/yuejunfeng0909/busalertbot:test-<branch-name>
+```
+
+Docker tags cannot contain `/`, so a branch such as `feature/multi-watch`
+publishes as `test-feature-multi-watch`.
 
 The workflow uses the repository's built-in `GITHUB_TOKEN`; no registry secret
 is required. New GHCR packages may initially be private. Change the package
@@ -89,7 +98,7 @@ pulls are required.
 
 ```text
 /find <name>
-/add <stop name or code> | <service>
+/add <stop[, stop...]> | <service[, service...]>
 /watchlist
 /delete <ID>
 /notify <ID>
@@ -103,6 +112,7 @@ Example:
 ```text
 /find Raffles Hotel
 /add 02049 | 36
+/add 02049, 04167 | 36, 111
 /notify 1
 /schedule 1 07:30
 ```
@@ -111,6 +121,10 @@ Daily times use `TIMEZONE`, which defaults to `Asia/Singapore`. A daily
 schedule starts an ETA session immediately at the configured time and repeats
 once per minute for 15 minutes. Each ETA message provides controls to approve
 another 15 minutes or dismiss the session.
+
+Comma-separated stops and services create one watch containing every
+stop/service combination. Combined ETA results are sorted by the next arrival,
+with unavailable combinations shown last.
 
 ## Verify
 

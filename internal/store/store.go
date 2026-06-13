@@ -19,13 +19,21 @@ var (
 )
 
 type Watch struct {
-	ID            int    `json:"id"`
-	StopCode      string `json:"stop_code"`
-	StopName      string `json:"stop_name"`
-	RoadName      string `json:"road_name,omitempty"`
-	ServiceNo     string `json:"service_no"`
-	Schedule      string `json:"schedule,omitempty"`
-	LastTriggered string `json:"last_triggered,omitempty"`
+	ID            int         `json:"id"`
+	Stops         []WatchStop `json:"stops,omitempty"`
+	ServiceNos    []string    `json:"service_nos,omitempty"`
+	StopCode      string      `json:"stop_code,omitempty"`
+	StopName      string      `json:"stop_name,omitempty"`
+	RoadName      string      `json:"road_name,omitempty"`
+	ServiceNo     string      `json:"service_no,omitempty"`
+	Schedule      string      `json:"schedule,omitempty"`
+	LastTriggered string      `json:"last_triggered,omitempty"`
+}
+
+type WatchStop struct {
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	RoadName string `json:"road_name,omitempty"`
 }
 
 type User struct {
@@ -68,6 +76,11 @@ func Open(path string) (*Store, error) {
 	if s.state.Users == nil {
 		s.state.Users = make(map[string]*User)
 	}
+	for _, user := range s.state.Users {
+		for i := range user.Watches {
+			normalizeWatch(&user.Watches[i])
+		}
+	}
 	return s, nil
 }
 
@@ -75,9 +88,10 @@ func (s *Store) Add(chatID int64, watch Watch) (Watch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	normalizeWatch(&watch)
 	user := s.user(chatID)
 	for _, existing := range user.Watches {
-		if existing.StopCode == watch.StopCode && strings.EqualFold(existing.ServiceNo, watch.ServiceNo) {
+		if sameWatch(existing, watch) {
 			return Watch{}, ErrDuplicate
 		}
 	}
@@ -220,6 +234,50 @@ func (s *Store) user(chatID int64) *User {
 		s.state.Users[k] = user
 	}
 	return user
+}
+
+func normalizeWatch(watch *Watch) {
+	if len(watch.Stops) == 0 && watch.StopCode != "" {
+		watch.Stops = []WatchStop{{
+			Code:     watch.StopCode,
+			Name:     watch.StopName,
+			RoadName: watch.RoadName,
+		}}
+	}
+	if len(watch.ServiceNos) == 0 && watch.ServiceNo != "" {
+		watch.ServiceNos = []string{strings.ToUpper(watch.ServiceNo)}
+	}
+	watch.StopCode = ""
+	watch.StopName = ""
+	watch.RoadName = ""
+	watch.ServiceNo = ""
+}
+
+func sameWatch(left, right Watch) bool {
+	normalizeWatch(&left)
+	normalizeWatch(&right)
+	if len(left.Stops) != len(right.Stops) || len(left.ServiceNos) != len(right.ServiceNos) {
+		return false
+	}
+	rightStops := make(map[string]bool, len(right.Stops))
+	for _, stop := range right.Stops {
+		rightStops[stop.Code] = true
+	}
+	for _, stop := range left.Stops {
+		if !rightStops[stop.Code] {
+			return false
+		}
+	}
+	rightServices := make(map[string]bool, len(right.ServiceNos))
+	for _, service := range right.ServiceNos {
+		rightServices[strings.ToUpper(service)] = true
+	}
+	for _, service := range left.ServiceNos {
+		if !rightServices[strings.ToUpper(service)] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) saveLocked() error {
