@@ -49,15 +49,6 @@ type WatchStop struct {
 	RoadName string `json:"road_name,omitempty"`
 }
 
-type User struct {
-	NextID  int     `json:"next_id"`
-	Watches []Watch `json:"watches"`
-}
-
-type legacyState struct {
-	Users map[string]*User `json:"users"`
-}
-
 type Store struct {
 	db *sql.DB
 }
@@ -68,12 +59,11 @@ type DueWatch struct {
 }
 
 func Open(path string) (*Store, error) {
-	dbPath, legacyPath := persistencePaths(path)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
 
-	dsn := (&url.URL{Scheme: "file", Path: dbPath}).String()
+	dsn := (&url.URL{Scheme: "file", Path: path}).String()
 	dsn += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -87,15 +77,9 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if err := os.Chmod(dbPath, 0o600); err != nil {
+	if err := os.Chmod(path, 0o600); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("secure sqlite state: %w", err)
-	}
-	if legacyPath != "" {
-		if err := s.migrateLegacyJSON(legacyPath); err != nil {
-			db.Close()
-			return nil, err
-		}
 	}
 	return s, nil
 }
@@ -320,74 +304,6 @@ func (s *Store) initialize() error {
 	return nil
 }
 
-func (s *Store) migrateLegacyJSON(path string) error {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read legacy state: %w", err)
-	}
-
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
-		return fmt.Errorf("check sqlite state: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-
-	var state legacyState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("decode legacy state: %w", err)
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin legacy migration: %w", err)
-	}
-	defer tx.Rollback()
-
-	for chatKey, user := range state.Users {
-		chatID, err := strconv.ParseInt(chatKey, 10, 64)
-		if err != nil {
-			return fmt.Errorf("decode legacy chat ID %q: %w", chatKey, err)
-		}
-		nextID := user.NextID
-		if nextID < 1 {
-			nextID = 1
-		}
-		for i := range user.Watches {
-			normalizeWatch(&user.Watches[i])
-			if user.Watches[i].ID >= nextID {
-				nextID = user.Watches[i].ID + 1
-			}
-		}
-		if _, err := tx.Exec(`INSERT INTO users (chat_id, next_id) VALUES (?, ?)`, chatID, nextID); err != nil {
-			return fmt.Errorf("migrate legacy user: %w", err)
-		}
-		for _, watch := range user.Watches {
-			payload, err := encodeWatch(watch)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`
-				INSERT INTO watches (
-					chat_id, watch_id, alias, signature, payload, schedule, schedule_minute, last_triggered
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			`, chatID, watch.ID, watch.Alias, watchSignature(watch), payload, watch.Schedule, scheduleMinute(watch.Schedule), watch.LastTriggered); err != nil {
-				return fmt.Errorf("migrate legacy watch: %w", err)
-			}
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit legacy migration: %w", err)
-	}
-	if err := os.Rename(path, path+".migrated"); err != nil {
-		return fmt.Errorf("archive legacy state: %w", err)
-	}
-	return nil
-}
-
 type rowScanner interface {
 	Scan(...any) error
 }
@@ -493,12 +409,4 @@ func classifyConstraint(err error) error {
 	default:
 		return fmt.Errorf("save watch: %w", err)
 	}
-}
-
-func persistencePaths(path string) (dbPath, legacyPath string) {
-	if strings.EqualFold(filepath.Ext(path), ".json") {
-		return strings.TrimSuffix(path, filepath.Ext(path)) + ".db", path
-	}
-	legacy := strings.TrimSuffix(path, filepath.Ext(path)) + ".json"
-	return path, legacy
 }

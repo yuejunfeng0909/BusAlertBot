@@ -65,7 +65,7 @@ func (fakeLTAClient) ServicesAtStops(context.Context, []string) (map[string][]st
 
 func newTestBot(t *testing.T) (*Bot, *store.Store, *fakeTelegramClient) {
 	t.Helper()
-	data, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

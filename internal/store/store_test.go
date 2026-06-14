@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,7 +9,7 @@ import (
 )
 
 func TestStoreIDsPersistAndDoNotReuseDeletedIDs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	data, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +40,7 @@ func TestStoreIDsPersistAndDoNotReuseDeletedIDs(t *testing.T) {
 }
 
 func TestStoreRejectsDuplicateWatch(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +54,7 @@ func TestStoreRejectsDuplicateWatch(t *testing.T) {
 }
 
 func TestStoreRejectsReorderedMultiWatchAsDuplicate(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func TestStoreRejectsReorderedMultiWatchAsDuplicate(t *testing.T) {
 }
 
 func TestStoreAliasesResolveCaseInsensitivelyAndPersist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	data, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +110,7 @@ func TestStoreAliasesResolveCaseInsensitivelyAndPersist(t *testing.T) {
 }
 
 func TestStoreRejectsDuplicateAliasWithinChat(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +141,7 @@ func TestStoreRejectsDuplicateAliasWithinChat(t *testing.T) {
 }
 
 func TestClaimDueOnlyOncePerMinute(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,37 +219,5 @@ func TestClaimDueIsAtomicAcrossStoreInstances(t *testing.T) {
 	}
 	if claimed != 1 {
 		t.Fatalf("claimed %d watches across two stores, want 1", claimed)
-	}
-}
-
-func TestOpenMigratesLegacySingleStopWatch(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	legacy := `{"users":{"42":{"next_id":2,"watches":[{"id":1,"stop_code":"02049","stop_name":"Raffles Hotel","road_name":"Bras Basah Rd","service_no":"36"}]}}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	watch, err := data.Get(42, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(watch.Stops) != 1 || watch.Stops[0].Code != "02049" {
-		t.Fatalf("stops = %#v", watch.Stops)
-	}
-	if len(watch.ServiceNos) != 1 || watch.ServiceNos[0] != "36" {
-		t.Fatalf("service numbers = %#v", watch.ServiceNos)
-	}
-	if len(watch.Combinations) != 1 || watch.Combinations[0].StopCode != "02049" || watch.Combinations[0].ServiceNo != "36" {
-		t.Fatalf("combinations = %#v", watch.Combinations)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy state still exists: %v", err)
-	}
-	if _, err := os.Stat(path + ".migrated"); err != nil {
-		t.Fatalf("archived legacy state: %v", err)
 	}
 }
