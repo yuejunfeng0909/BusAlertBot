@@ -29,6 +29,7 @@ func main() {
 		log.Error("open data store", "error", err)
 		os.Exit(1)
 	}
+	defer data.Close()
 
 	app := bot.New(
 		log,

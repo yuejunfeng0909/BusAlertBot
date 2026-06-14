@@ -2,14 +2,14 @@ package store
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestStoreIDsPersistAndDoNotReuseDeletedIDs(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	data, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestStoreIDsPersistAndDoNotReuseDeletedIDs(t *testing.T) {
 }
 
 func TestStoreRejectsDuplicateWatch(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestStoreRejectsDuplicateWatch(t *testing.T) {
 }
 
 func TestStoreRejectsReorderedMultiWatchAsDuplicate(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestStoreRejectsReorderedMultiWatchAsDuplicate(t *testing.T) {
 }
 
 func TestStoreAliasesResolveCaseInsensitivelyAndPersist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	data, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestStoreAliasesResolveCaseInsensitivelyAndPersist(t *testing.T) {
 }
 
 func TestStoreRejectsDuplicateAliasWithinChat(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestStoreRejectsDuplicateAliasWithinChat(t *testing.T) {
 }
 
 func TestClaimDueOnlyOncePerMinute(t *testing.T) {
-	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	data, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,28 +170,54 @@ func TestClaimDueOnlyOncePerMinute(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesLegacySingleStopWatch(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	legacy := `{"users":{"42":{"next_id":2,"watches":[{"id":1,"stop_code":"02049","stop_name":"Raffles Hotel","road_name":"Bras Basah Rd","service_no":"36"}]}}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+func TestClaimDueIsAtomicAcrossStoreInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	watch, err := first.Add(99, Watch{StopCode: "02049", ServiceNo: "36"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.SetSchedule(99, watch.ID, "07:30"); err != nil {
 		t.Fatal(err)
 	}
 
-	data, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
+	now := time.Date(2026, time.June, 13, 7, 30, 5, 0, time.FixedZone("SGT", 8*60*60))
+	results := make(chan []DueWatch, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, data := range []*Store{first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			due, err := data.ClaimDue(now)
+			results <- due
+			errs <- err
+		}()
 	}
-	watch, err := data.Get(42, 1)
-	if err != nil {
-		t.Fatal(err)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if len(watch.Stops) != 1 || watch.Stops[0].Code != "02049" {
-		t.Fatalf("stops = %#v", watch.Stops)
+	var claimed int
+	for due := range results {
+		claimed += len(due)
 	}
-	if len(watch.ServiceNos) != 1 || watch.ServiceNos[0] != "36" {
-		t.Fatalf("service numbers = %#v", watch.ServiceNos)
-	}
-	if len(watch.Combinations) != 1 || watch.Combinations[0].StopCode != "02049" || watch.Combinations[0].ServiceNo != "36" {
-		t.Fatalf("combinations = %#v", watch.Combinations)
+	if claimed != 1 {
+		t.Fatalf("claimed %d watches across two stores, want 1", claimed)
 	}
 }

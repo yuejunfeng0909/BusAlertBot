@@ -19,6 +19,8 @@ import (
 const (
 	sessionDuration    = 15 * time.Minute
 	sessionExpiryGrace = 10 * time.Second
+	schedulerWorkers   = 8
+	schedulerQueueSize = 512
 )
 
 type LTAClient interface {
@@ -55,6 +57,12 @@ type sessionKey struct {
 type session struct {
 	expiresAt time.Time
 	nextAt    time.Time
+}
+
+type notificationJob struct {
+	chatID int64
+	watch  store.Watch
+	active bool
 }
 
 func New(log *slog.Logger, data *store.Store, ltaClient LTAClient, telegramClient TelegramClient, location *time.Location, pollTimeout time.Duration) *Bot {
@@ -448,6 +456,22 @@ func (b *Bot) promptWatchSelection(ctx context.Context, chatID int64, action, pr
 }
 
 func (b *Bot) runScheduler(ctx context.Context) {
+	jobs := make(chan notificationJob, schedulerQueueSize)
+	var workers sync.WaitGroup
+	for range schedulerWorkers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				b.sendETA(ctx, job.chatID, job.watch, job.active)
+			}
+		}()
+	}
+	defer func() {
+		close(jobs)
+		workers.Wait()
+	}()
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -456,12 +480,23 @@ func (b *Bot) runScheduler(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			localNow := now.In(b.location)
-			dueSchedules, err := b.store.ClaimDue(localNow)
-			if err != nil {
-				b.log.Error("claim daily schedules", "error", err)
-			}
-			for _, due := range dueSchedules {
-				b.sendETA(ctx, due.ChatID, due.Watch, false)
+			for {
+				dueSchedules, err := b.store.ClaimDue(localNow)
+				if err != nil {
+					b.log.Error("claim daily schedules", "error", err)
+					break
+				}
+				for _, due := range dueSchedules {
+					if !enqueueNotification(ctx, jobs, notificationJob{
+						chatID: due.ChatID,
+						watch:  due.Watch,
+					}) {
+						return
+					}
+				}
+				if len(dueSchedules) == 0 {
+					break
+				}
 			}
 			for _, due := range b.dueSessions(now) {
 				watch, err := b.store.Get(due.chatID, due.watchID)
@@ -473,9 +508,24 @@ func (b *Bot) runScheduler(ctx context.Context) {
 					b.log.Error("load scheduled watch", "error", err)
 					continue
 				}
-				b.sendETA(ctx, due.chatID, watch, true)
+				if !enqueueNotification(ctx, jobs, notificationJob{
+					chatID: due.chatID,
+					watch:  watch,
+					active: true,
+				}) {
+					return
+				}
 			}
 		}
+	}
+}
+
+func enqueueNotification(ctx context.Context, jobs chan<- notificationJob, job notificationJob) bool {
+	select {
+	case jobs <- job:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

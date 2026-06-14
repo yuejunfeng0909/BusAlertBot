@@ -1,16 +1,19 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 var (
@@ -18,6 +21,8 @@ var (
 	ErrDuplicate      = errors.New("watch item already exists")
 	ErrDuplicateAlias = errors.New("watch alias already exists")
 )
+
+const dueBatchSize = 500
 
 type Watch struct {
 	ID            int                `json:"id"`
@@ -44,19 +49,8 @@ type WatchStop struct {
 	RoadName string `json:"road_name,omitempty"`
 }
 
-type User struct {
-	NextID  int     `json:"next_id"`
-	Watches []Watch `json:"watches"`
-}
-
-type state struct {
-	Users map[string]*User `json:"users"`
-}
-
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	state state
+	db *sql.DB
 }
 
 type DueWatch struct {
@@ -65,244 +59,291 @@ type DueWatch struct {
 }
 
 func Open(path string) (*Store, error) {
-	s := &Store{
-		path: path,
-		state: state{
-			Users: make(map[string]*User),
-		},
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create state directory: %w", err)
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
+
+	dsn := (&url.URL{Scheme: "file", Path: path}).String()
+	dsn += "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
+		return nil, fmt.Errorf("open sqlite state: %w", err)
 	}
-	if err := json.Unmarshal(data, &s.state); err != nil {
-		return nil, fmt.Errorf("decode state: %w", err)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+
+	s := &Store{db: db}
+	if err := s.initialize(); err != nil {
+		db.Close()
+		return nil, err
 	}
-	if s.state.Users == nil {
-		s.state.Users = make(map[string]*User)
-	}
-	for _, user := range s.state.Users {
-		for i := range user.Watches {
-			normalizeWatch(&user.Watches[i])
-		}
+	if err := os.Chmod(path, 0o600); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("secure sqlite state: %w", err)
 	}
 	return s, nil
 }
 
-func (s *Store) Add(chatID int64, watch Watch) (Watch, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) Close() error {
+	return s.db.Close()
+}
 
+func (s *Store) Add(chatID int64, watch Watch) (Watch, error) {
 	normalizeWatch(&watch)
-	user := s.user(chatID)
-	for _, existing := range user.Watches {
-		if sameWatch(existing, watch) {
-			return Watch{}, ErrDuplicate
-		}
-		if watch.Alias != "" && strings.EqualFold(existing.Alias, watch.Alias) {
-			return Watch{}, ErrDuplicateAlias
-		}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Watch{}, fmt.Errorf("begin add watch: %w", err)
 	}
-	if user.NextID < 1 {
-		user.NextID = 1
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		INSERT INTO users (chat_id, next_id) VALUES (?, 1)
+		ON CONFLICT(chat_id) DO NOTHING
+	`, chatID); err != nil {
+		return Watch{}, fmt.Errorf("ensure user: %w", err)
 	}
-	watch.ID = user.NextID
-	user.NextID++
-	user.Watches = append(user.Watches, watch)
-	if err := s.saveLocked(); err != nil {
-		user.Watches = user.Watches[:len(user.Watches)-1]
-		user.NextID--
+	if err := tx.QueryRow(`
+		UPDATE users SET next_id = next_id + 1
+		WHERE chat_id = ?
+		RETURNING next_id - 1
+	`, chatID).Scan(&watch.ID); err != nil {
+		return Watch{}, fmt.Errorf("allocate watch ID: %w", err)
+	}
+	payload, err := encodeWatch(watch)
+	if err != nil {
 		return Watch{}, err
+	}
+	_, err = tx.Exec(`
+		INSERT INTO watches (
+			chat_id, watch_id, alias, signature, payload, schedule, schedule_minute, last_triggered
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, chatID, watch.ID, watch.Alias, watchSignature(watch), payload, watch.Schedule, scheduleMinute(watch.Schedule), watch.LastTriggered)
+	if err != nil {
+		return Watch{}, classifyConstraint(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Watch{}, fmt.Errorf("commit add watch: %w", err)
 	}
 	return watch, nil
 }
 
 func (s *Store) List(chatID int64) []Watch {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	user := s.state.Users[key(chatID)]
-	if user == nil {
+	rows, err := s.db.Query(`
+		SELECT watch_id, alias, payload, schedule, last_triggered
+		FROM watches WHERE chat_id = ? ORDER BY watch_id
+	`, chatID)
+	if err != nil {
 		return nil
 	}
-	watches := append([]Watch(nil), user.Watches...)
-	sort.Slice(watches, func(i, j int) bool { return watches[i].ID < watches[j].ID })
+	defer rows.Close()
+
+	var watches []Watch
+	for rows.Next() {
+		watch, err := scanWatch(rows)
+		if err != nil {
+			return nil
+		}
+		watches = append(watches, watch)
+	}
 	return watches
 }
 
 func (s *Store) Get(chatID int64, id int) (Watch, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	user := s.state.Users[key(chatID)]
-	if user != nil {
-		for _, watch := range user.Watches {
-			if watch.ID == id {
-				return watch, nil
-			}
-		}
-	}
-	return Watch{}, ErrNotFound
+	return queryWatch(s.db.QueryRow(`
+		SELECT watch_id, alias, payload, schedule, last_triggered
+		FROM watches WHERE chat_id = ? AND watch_id = ?
+	`, chatID, id))
 }
 
 func (s *Store) Resolve(chatID int64, reference string) (Watch, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	reference = strings.TrimSpace(reference)
-	user := s.state.Users[key(chatID)]
-	if user == nil {
-		return Watch{}, ErrNotFound
-	}
 	if id, err := strconv.Atoi(reference); err == nil {
-		for _, watch := range user.Watches {
-			if watch.ID == id {
-				return watch, nil
-			}
-		}
-		return Watch{}, ErrNotFound
+		return s.Get(chatID, id)
 	}
-	for _, watch := range user.Watches {
-		if watch.Alias != "" && strings.EqualFold(watch.Alias, reference) {
-			return watch, nil
-		}
-	}
-	return Watch{}, ErrNotFound
+	return queryWatch(s.db.QueryRow(`
+		SELECT watch_id, alias, payload, schedule, last_triggered
+		FROM watches WHERE chat_id = ? AND alias = ? COLLATE NOCASE
+	`, chatID, reference))
 }
 
 func (s *Store) SetAlias(chatID int64, id int, alias string) (Watch, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user := s.state.Users[key(chatID)]
-	if user == nil {
-		return Watch{}, ErrNotFound
-	}
 	alias = strings.ToLower(strings.TrimSpace(alias))
-	target := -1
-	for i := range user.Watches {
-		if user.Watches[i].ID == id {
-			target = i
-			break
-		}
+	result, err := s.db.Exec(`
+		UPDATE watches SET alias = ? WHERE chat_id = ? AND watch_id = ?
+	`, alias, chatID, id)
+	if err != nil {
+		return Watch{}, classifyConstraint(err)
 	}
-	if target == -1 {
+	if affected, err := result.RowsAffected(); err != nil {
+		return Watch{}, fmt.Errorf("check alias update: %w", err)
+	} else if affected == 0 {
 		return Watch{}, ErrNotFound
 	}
-	for _, watch := range user.Watches {
-		if watch.ID != id && watch.Alias != "" && strings.EqualFold(watch.Alias, alias) {
-			return Watch{}, ErrDuplicateAlias
-		}
-	}
-	oldAlias := user.Watches[target].Alias
-	user.Watches[target].Alias = alias
-	if err := s.saveLocked(); err != nil {
-		user.Watches[target].Alias = oldAlias
-		return Watch{}, err
-	}
-	return user.Watches[target], nil
+	return s.Get(chatID, id)
 }
 
 func (s *Store) Delete(chatID int64, id int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user := s.state.Users[key(chatID)]
-	if user == nil {
+	result, err := s.db.Exec(`DELETE FROM watches WHERE chat_id = ? AND watch_id = ?`, chatID, id)
+	if err != nil {
+		return fmt.Errorf("delete watch: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check deleted watch: %w", err)
+	}
+	if affected == 0 {
 		return ErrNotFound
 	}
-	for i, watch := range user.Watches {
-		if watch.ID != id {
-			continue
-		}
-		removed := watch
-		user.Watches = append(user.Watches[:i], user.Watches[i+1:]...)
-		if err := s.saveLocked(); err != nil {
-			user.Watches = append(user.Watches, Watch{})
-			copy(user.Watches[i+1:], user.Watches[i:])
-			user.Watches[i] = removed
-			return err
-		}
-		return nil
-	}
-	return ErrNotFound
+	return nil
 }
 
 func (s *Store) SetSchedule(chatID int64, id int, schedule string) (Watch, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user := s.state.Users[key(chatID)]
-	if user == nil {
+	result, err := s.db.Exec(`
+		UPDATE watches
+		SET schedule = ?, schedule_minute = ?, last_triggered = ''
+		WHERE chat_id = ? AND watch_id = ?
+	`, schedule, scheduleMinute(schedule), chatID, id)
+	if err != nil {
+		return Watch{}, fmt.Errorf("set watch schedule: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Watch{}, fmt.Errorf("check schedule update: %w", err)
+	}
+	if affected == 0 {
 		return Watch{}, ErrNotFound
 	}
-	for i := range user.Watches {
-		if user.Watches[i].ID != id {
-			continue
-		}
-		oldSchedule := user.Watches[i].Schedule
-		oldLastTriggered := user.Watches[i].LastTriggered
-		user.Watches[i].Schedule = schedule
-		user.Watches[i].LastTriggered = ""
-		if err := s.saveLocked(); err != nil {
-			user.Watches[i].Schedule = oldSchedule
-			user.Watches[i].LastTriggered = oldLastTriggered
-			return Watch{}, err
-		}
-		return user.Watches[i], nil
-	}
-	return Watch{}, ErrNotFound
+	return s.Get(chatID, id)
 }
 
 func (s *Store) ClaimDue(now time.Time) ([]DueWatch, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	minute := now.Format("2006-01-02 15:04")
-	hhmm := now.Format("15:04")
+	rows, err := s.db.Query(`
+		WITH due AS (
+			SELECT rowid
+			FROM watches
+			WHERE schedule_minute = ?
+			  AND last_triggered <> ?
+			LIMIT ?
+		)
+		UPDATE watches
+		SET last_triggered = ?
+		WHERE rowid IN (SELECT rowid FROM due)
+		  AND last_triggered <> ?
+		RETURNING chat_id, watch_id, alias, payload, schedule, last_triggered
+	`, now.Hour()*60+now.Minute(), minute, dueBatchSize, minute, minute)
+	if err != nil {
+		return nil, fmt.Errorf("claim due watches: %w", err)
+	}
+	defer rows.Close()
+
 	var due []DueWatch
-	type claimedWatch struct {
-		watch         *Watch
-		lastTriggered string
+	for rows.Next() {
+		var item DueWatch
+		var payload []byte
+		var watchID int
+		var alias, schedule, lastTriggered string
+		if err := rows.Scan(
+			&item.ChatID,
+			&watchID,
+			&alias,
+			&payload,
+			&schedule,
+			&lastTriggered,
+		); err != nil {
+			return nil, fmt.Errorf("scan due watch: %w", err)
+		}
+		if err := json.Unmarshal(payload, &item.Watch); err != nil {
+			return nil, fmt.Errorf("decode due watch: %w", err)
+		}
+		item.Watch.ID = watchID
+		item.Watch.Alias = alias
+		item.Watch.Schedule = schedule
+		item.Watch.LastTriggered = lastTriggered
+		due = append(due, item)
 	}
-	var claimed []claimedWatch
-	for chatKey, user := range s.state.Users {
-		chatID, err := strconv.ParseInt(chatKey, 10, 64)
-		if err != nil {
-			continue
-		}
-		for i := range user.Watches {
-			watch := &user.Watches[i]
-			if watch.Schedule != hhmm || watch.LastTriggered == minute {
-				continue
-			}
-			claimed = append(claimed, claimedWatch{watch: watch, lastTriggered: watch.LastTriggered})
-			watch.LastTriggered = minute
-			due = append(due, DueWatch{ChatID: chatID, Watch: *watch})
-		}
-	}
-	if len(due) > 0 {
-		if err := s.saveLocked(); err != nil {
-			for _, item := range claimed {
-				item.watch.LastTriggered = item.lastTriggered
-			}
-			return nil, err
-		}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read due watches: %w", err)
 	}
 	return due, nil
 }
 
-func (s *Store) user(chatID int64) *User {
-	k := key(chatID)
-	user := s.state.Users[k]
-	if user == nil {
-		user = &User{NextID: 1, Watches: []Watch{}}
-		s.state.Users[k] = user
+func (s *Store) initialize() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			chat_id INTEGER PRIMARY KEY,
+			next_id INTEGER NOT NULL CHECK (next_id >= 1)
+		);
+
+		CREATE TABLE IF NOT EXISTS watches (
+			chat_id INTEGER NOT NULL,
+			watch_id INTEGER NOT NULL,
+			alias TEXT NOT NULL DEFAULT '',
+			signature TEXT NOT NULL,
+			payload BLOB NOT NULL,
+			schedule TEXT NOT NULL DEFAULT '',
+			schedule_minute INTEGER,
+			last_triggered TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (chat_id, watch_id),
+			FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS watches_alias
+			ON watches(chat_id, alias COLLATE NOCASE)
+			WHERE alias <> '';
+		CREATE UNIQUE INDEX IF NOT EXISTS watches_signature
+			ON watches(chat_id, signature);
+		CREATE INDEX IF NOT EXISTS watches_due
+			ON watches(schedule_minute)
+			WHERE schedule_minute IS NOT NULL;
+	`)
+	if err != nil {
+		return fmt.Errorf("initialize sqlite state: %w", err)
 	}
-	return user
+	return nil
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func queryWatch(row rowScanner) (Watch, error) {
+	watch, err := scanWatch(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Watch{}, ErrNotFound
+	}
+	if err != nil {
+		return Watch{}, fmt.Errorf("load watch: %w", err)
+	}
+	return watch, nil
+}
+
+func scanWatch(row rowScanner) (Watch, error) {
+	var watch Watch
+	var payload []byte
+	var alias, schedule, lastTriggered string
+	if err := row.Scan(&watch.ID, &alias, &payload, &schedule, &lastTriggered); err != nil {
+		return Watch{}, err
+	}
+	if err := json.Unmarshal(payload, &watch); err != nil {
+		return Watch{}, fmt.Errorf("decode watch: %w", err)
+	}
+	watch.Alias = alias
+	watch.Schedule = schedule
+	watch.LastTriggered = lastTriggered
+	return watch, nil
+}
+
+func encodeWatch(watch Watch) ([]byte, error) {
+	watch.Alias = ""
+	watch.Schedule = ""
+	watch.LastTriggered = ""
+	data, err := json.Marshal(watch)
+	if err != nil {
+		return nil, fmt.Errorf("encode watch: %w", err)
+	}
+	return data, nil
 }
 
 func normalizeWatch(watch *Watch) {
@@ -333,65 +374,39 @@ func normalizeWatch(watch *Watch) {
 	watch.ServiceNo = ""
 }
 
-func sameWatch(left, right Watch) bool {
-	normalizeWatch(&left)
-	normalizeWatch(&right)
-	if len(left.Combinations) != len(right.Combinations) {
-		return false
+func watchSignature(watch Watch) string {
+	normalizeWatch(&watch)
+	keys := make([]string, 0, len(watch.Combinations))
+	for _, combination := range watch.Combinations {
+		keys = append(keys, combinationKey(combination))
 	}
-	rightCombinations := make(map[string]bool, len(right.Combinations))
-	for _, combination := range right.Combinations {
-		rightCombinations[combinationKey(combination)] = true
-	}
-	for _, combination := range left.Combinations {
-		if !rightCombinations[combinationKey(combination)] {
-			return false
-		}
-	}
-	return true
+	sort.Strings(keys)
+	return strings.Join(keys, "\x01")
 }
 
 func combinationKey(combination WatchCombination) string {
 	return combination.StopCode + "\x00" + strings.ToUpper(combination.ServiceNo)
 }
 
-func (s *Store) saveLocked() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
+func scheduleMinute(schedule string) any {
+	if schedule == "" {
+		return nil
+	}
+	parsed, err := time.Parse("15:04", schedule)
 	if err != nil {
-		return fmt.Errorf("encode state: %w", err)
+		return nil
 	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create state directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary state: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("secure temporary state: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write state: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close state: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("replace state: %w", err)
-	}
-	return nil
+	return parsed.Hour()*60 + parsed.Minute()
 }
 
-func key(chatID int64) string {
-	return strconv.FormatInt(chatID, 10)
+func classifyConstraint(err error) error {
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "watches.chat_id, watches.signature"):
+		return ErrDuplicate
+	case strings.Contains(message, "watches.chat_id, watches.alias"):
+		return ErrDuplicateAlias
+	default:
+		return fmt.Errorf("save watch: %w", err)
+	}
 }

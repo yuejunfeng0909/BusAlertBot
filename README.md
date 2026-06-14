@@ -16,7 +16,7 @@ updates, and schedule a daily notification prompt.
 - Dismiss an active session with an inline button.
 - Deliver normal ETA updates silently.
 - Enable Telegram notification sound when the next ETA is under two minutes.
-- Persist watchlists and schedules in an atomically-written JSON file.
+- Persist watchlists and schedules in an indexed SQLite database.
 
 ## Requirements
 
@@ -68,8 +68,9 @@ set +a
 go run ./cmd/busalertbot
 ```
 
-State is stored in `/app/data/state.json` in the container by default. The
-Compose deployment keeps it in a persistent named volume.
+State is stored in `/app/data/state.db` in the container by default. SQLite
+runs in WAL mode, and the Compose deployment keeps the database in a
+persistent named volume.
 
 ## CI/CD
 
