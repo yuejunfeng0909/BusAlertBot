@@ -69,17 +69,6 @@ type DueWatch struct {
 
 func Open(path string) (*Store, error) {
 	dbPath, legacyPath := persistencePaths(path)
-	var err error
-	dbPath, err = filepath.Abs(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve sqlite state path: %w", err)
-	}
-	if legacyPath != "" {
-		legacyPath, err = filepath.Abs(legacyPath)
-		if err != nil {
-			return nil, fmt.Errorf("resolve legacy state path: %w", err)
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}

@@ -68,9 +68,9 @@ set +a
 go run ./cmd/busalertbot
 ```
 
-`DATA_FILE` must be an absolute path. The example configuration uses
-`/app/data/state.db`, which is stored in the Compose deployment's persistent
-named volume. SQLite runs in WAL mode.
+State is stored in `/app/data/state.db` in the container by default. SQLite
+runs in WAL mode, and the Compose deployment keeps the database in a
+persistent named volume.
 
 Existing `state.json` data is imported automatically when the SQLite database
 is first opened. After a successful migration, the original file is retained
