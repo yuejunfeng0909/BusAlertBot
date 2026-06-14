@@ -40,6 +40,28 @@ func TestStoreIDsPersistAndDoNotReuseDeletedIDs(t *testing.T) {
 	}
 }
 
+func TestOpenAcceptsRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeDir, err := filepath.Rel(workingDir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Open(filepath.Join(relativeDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := data.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("relative database path was not created: %v", err)
+	}
+}
+
 func TestStoreRejectsDuplicateWatch(t *testing.T) {
 	data, err := Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
