@@ -790,10 +790,8 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 				urgent = true
 			}
 			label := durationMinutesLabel(remaining)
-			if len(labels) == 0 {
-				if load := loadLabel(bus.Load); load != "" {
-					label += " (" + load + ")"
-				}
+			if loadLabel(bus.Load) == "standing" {
+				label += " (standing)"
 			}
 			labels = append(labels, label)
 		}

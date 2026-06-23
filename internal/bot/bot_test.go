@@ -218,7 +218,7 @@ func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
 	if !urgent {
 		t.Fatal("urgent = false, want true")
 	}
-	want := "36 at Raffles Hotel (02049)\nETA(mins): 1 (seats), 5, 10"
+	want := "36 at Raffles Hotel (02049)\nETA(mins): 1, 5 (standing), 10"
 	if text != want {
 		t.Fatalf("text = %q, want %q", text, want)
 	}
