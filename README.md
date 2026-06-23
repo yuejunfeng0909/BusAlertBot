@@ -100,7 +100,6 @@ pulls are required.
 ## Commands
 
 ```text
-/find <name>
 /add <stop[, stop...]> | <service[, service...]>
 /watchlist
 /alias <watch> <name>
@@ -114,7 +113,6 @@ pulls are required.
 Example:
 
 ```text
-/find Raffles Hotel
 /add 02049 | 36
 /add 02049, 04167 | 36, 111
 /alias 1 home
