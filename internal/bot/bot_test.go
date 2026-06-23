@@ -174,7 +174,7 @@ func TestWatchSelectionCallbacksPerformActions(t *testing.T) {
 			Chat:      telegram.Chat{ID: chatID},
 		},
 	})
-	if len(client.messages) < 2 || !strings.Contains(client.messages[len(client.messages)-1].text, "Watch #1 ETAs:") {
+	if len(client.messages) < 2 || !strings.Contains(client.messages[len(client.messages)-1].text, "36 at Raffles Hotel") {
 		t.Fatalf("messages = %#v", client.messages)
 	}
 
@@ -208,14 +208,19 @@ func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
 			EstimatedArrival: now.Add(5*time.Minute + 59*time.Second).Format(time.RFC3339),
 			Load:             "SDA",
 		},
+		NextBus3: lta.Arrival{
+			EstimatedArrival: now.Add(10 * time.Minute).Format(time.RFC3339),
+			Load:             "LSD",
+		},
 	}}
 
 	text, urgent := formatETA(watch, map[string][]lta.ServiceArrival{"02049": services}, now)
 	if !urgent {
 		t.Fatal("urgent = false, want true")
 	}
-	if !strings.Contains(text, "1 min (seats), 5 min (standing)") {
-		t.Fatalf("text = %q", text)
+	want := "36 at Raffles Hotel (02049)\nETA(mins): 1 (seats), 5, 10"
+	if text != want {
+		t.Fatalf("text = %q, want %q", text, want)
 	}
 }
 
@@ -297,10 +302,10 @@ func TestFormatETASortsStopServiceCombinationsByNextArrival(t *testing.T) {
 
 	text, _ := formatETA(watch, arrivals, now)
 	expectedOrder := []string{
-		"Bus 111 at Raffles Hotel",
-		"Bus 36 at Stamford Court",
-		"Bus 36 at Raffles Hotel",
-		"Bus 111 at Stamford Court",
+		"111 at Raffles Hotel",
+		"36 at Stamford Court",
+		"36 at Raffles Hotel",
+		"111 at Stamford Court",
 	}
 	last := -1
 	for _, expected := range expectedOrder {

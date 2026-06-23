@@ -777,9 +777,8 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 	})
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s ETAs:", watchLabel(watch))
 	urgent := false
-	for _, result := range results {
+	for i, result := range results {
 		var labels []string
 		for _, bus := range result.arrivals {
 			arrivalTime, err := time.Parse(time.RFC3339, bus.EstimatedArrival)
@@ -790,17 +789,22 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 			if remaining < 2*time.Minute {
 				urgent = true
 			}
-			label := durationLabel(remaining)
-			if load := loadLabel(bus.Load); load != "" {
-				label += " (" + load + ")"
+			label := durationMinutesLabel(remaining)
+			if len(labels) == 0 {
+				if load := loadLabel(bus.Load); load != "" {
+					label += " (" + load + ")"
+				}
 			}
 			labels = append(labels, label)
 		}
-		fmt.Fprintf(&text, "\n\nBus %s at %s (%s)\n", result.serviceNo, result.stop.Name, result.stop.Code)
+		if i > 0 {
+			text.WriteString("\n\n")
+		}
+		fmt.Fprintf(&text, "%s at %s (%s)\n", result.serviceNo, result.stop.Name, result.stop.Code)
 		if len(labels) == 0 {
 			text.WriteString("No ETA available.")
 		} else {
-			text.WriteString("ETA: " + strings.Join(labels, ", "))
+			text.WriteString("ETA(mins): " + strings.Join(labels, ", "))
 		}
 	}
 	return text.String(), urgent
@@ -847,11 +851,11 @@ func watchCombinations(watch store.Watch) []store.WatchCombination {
 	return combinations
 }
 
-func durationLabel(duration time.Duration) string {
+func durationMinutesLabel(duration time.Duration) string {
 	if duration < time.Minute {
 		return "Arr"
 	}
-	return fmt.Sprintf("%d min", int(duration/time.Minute))
+	return fmt.Sprintf("%d", int(duration/time.Minute))
 }
 
 func loadLabel(load string) string {
