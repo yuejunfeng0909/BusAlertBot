@@ -122,8 +122,6 @@ func (b *Bot) handleMessage(ctx context.Context, message *telegram.Message) {
 		b.send(ctx, chatID, helpText, false, nil)
 	case "/add":
 		b.handleAdd(ctx, chatID, args)
-	case "/find":
-		b.handleFind(ctx, chatID, args)
 	case "/watchlist", "/list":
 		b.handleWatchlist(ctx, chatID)
 	case "/alias":
@@ -157,7 +155,7 @@ func (b *Bot) handleAdd(ctx context.Context, chatID int64, args string) {
 			return
 		}
 		if len(stops) == 0 {
-			b.send(ctx, chatID, fmt.Sprintf("No bus stop matched %q. Try /find <name>.", stopQuery), false, nil)
+			b.send(ctx, chatID, fmt.Sprintf("No bus stop matched %q. Try a bus stop code, name, or road.", stopQuery), false, nil)
 			return
 		}
 		if len(stops) > 1 && !strings.EqualFold(stops[0].Description, stopQuery) && stops[0].BusStopCode != stopQuery {
@@ -205,23 +203,6 @@ func (b *Bot) handleAdd(ctx context.Context, chatID int64, args string) {
 		return
 	}
 	b.send(ctx, chatID, formatAddedWatch(watch), false, nil)
-}
-
-func (b *Bot) handleFind(ctx context.Context, chatID int64, args string) {
-	if strings.TrimSpace(args) == "" {
-		b.send(ctx, chatID, "Usage: /find <bus stop name or road>", false, nil)
-		return
-	}
-	stops, err := b.lta.SearchStops(ctx, args, 10)
-	if err != nil {
-		b.fail(chatID, "search bus stops", err)
-		return
-	}
-	if len(stops) == 0 {
-		b.send(ctx, chatID, "No matching bus stops found.", false, nil)
-		return
-	}
-	b.send(ctx, chatID, formatStopMatches(stops), false, nil)
 }
 
 func (b *Bot) handleWatchlist(ctx context.Context, chatID int64) {
@@ -585,7 +566,6 @@ func (b *Bot) dueSessions(now time.Time) []sessionKey {
 func (b *Bot) registerCommands(ctx context.Context) error {
 	return b.telegram.SetCommands(ctx, []telegram.BotCommand{
 		{Command: "add", Description: "Add a stop and service"},
-		{Command: "find", Description: "Find a bus stop code"},
 		{Command: "watchlist", Description: "Show your watchlist"},
 		{Command: "alias", Description: "Add an alias to a watch"},
 		{Command: "delete", Description: "Delete a watch"},
@@ -951,16 +931,10 @@ func sleepContext(ctx context.Context, duration time.Duration) bool {
 
 const helpText = `Bus ETA watchlist
 
-/find <name> - find bus stop codes
 /add <stop[, stop...]> | <service[, service...]> - add a watch
 /watchlist - list watches, IDs, and aliases
 /alias <watch> <name> - add or change a watch alias
 /delete <watch> - delete a watch
 /notify <watch> - send an ETA prompt
 /schedule <watch> <HH:MM> - schedule a daily ETA prompt
-/unschedule <watch> - remove a daily schedule
-
-Only services that serve the selected stops are saved. Combined ETA results are sorted by the next arrival.
-Use a watch's ID or alias wherever <watch> appears.
-
-Choose "Keep notifying (15 mins)" to receive updates every minute. Choosing it again extends the updates for 15 minutes from that point. Active updates can be dismissed. Notifications are silent unless the next bus is less than 2 minutes away.`
+/unschedule <watch> - remove a daily schedule`
