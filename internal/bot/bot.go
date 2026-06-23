@@ -33,7 +33,8 @@ type LTAClient interface {
 
 type TelegramClient interface {
 	GetUpdates(context.Context, int64, time.Duration) ([]telegram.Update, error)
-	SendMessage(context.Context, int64, string, bool, *telegram.InlineKeyboardMarkup) error
+	SendMessage(context.Context, int64, string, bool, *telegram.InlineKeyboardMarkup) (*telegram.Message, error)
+	DeleteMessage(context.Context, int64, int64) error
 	AnswerCallback(context.Context, string, string) error
 	EditMessageReplyMarkup(context.Context, int64, int64, *telegram.InlineKeyboardMarkup) error
 	SetCommands(context.Context, []telegram.BotCommand) error
@@ -57,8 +58,9 @@ type sessionKey struct {
 }
 
 type session struct {
-	expiresAt time.Time
-	nextAt    time.Time
+	expiresAt     time.Time
+	nextAt        time.Time
+	lastMessageID int64
 }
 
 type notificationJob struct {
@@ -417,7 +419,7 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 		b.send(ctx, chatID, fmt.Sprintf("Removed the daily schedule from %s.", watchLabel(watch)), false, nil)
 		b.answer(ctx, callback.ID, "Schedule removed.")
 	case "keep", "continue":
-		b.activate(chatID, id, time.Now())
+		b.activate(chatID, id, time.Now(), callback.Message.MessageID)
 		b.editKeyboard(ctx, chatID, callback.Message.MessageID, notificationKeyboard(id, true))
 		b.answer(ctx, callback.ID, "ETA updates enabled for 15 minutes.")
 	case "dismiss":
@@ -524,10 +526,16 @@ func (b *Bot) sendETA(ctx context.Context, chatID int64, watch store.Watch, acti
 	}
 	now := time.Now()
 	text, urgent := formatETA(watch, arrivalsByStop, now)
-	b.send(ctx, chatID, text, !urgent, notificationKeyboard(watch.ID, active))
+	messageID := b.send(ctx, chatID, text, !urgent, notificationKeyboard(watch.ID, active))
+	if active && messageID != 0 {
+		previousMessageID, ok := b.replaceSessionMessage(chatID, watch.ID, messageID)
+		if ok && previousMessageID != 0 && previousMessageID != messageID {
+			b.deleteMessage(ctx, chatID, previousMessageID)
+		}
+	}
 }
 
-func (b *Bot) activate(chatID int64, watchID int, now time.Time) {
+func (b *Bot) activate(chatID int64, watchID int, now time.Time, lastMessageID int64) {
 	b.sessionsMu.Lock()
 	defer b.sessionsMu.Unlock()
 	key := sessionKey{chatID: chatID, watchID: watchID}
@@ -536,7 +544,24 @@ func (b *Bot) activate(chatID int64, watchID int, now time.Time) {
 		active.nextAt = now.Add(time.Minute)
 	}
 	active.expiresAt = now.Add(sessionDuration)
+	if lastMessageID != 0 {
+		active.lastMessageID = lastMessageID
+	}
 	b.sessions[key] = active
+}
+
+func (b *Bot) replaceSessionMessage(chatID int64, watchID int, messageID int64) (int64, bool) {
+	b.sessionsMu.Lock()
+	defer b.sessionsMu.Unlock()
+	key := sessionKey{chatID: chatID, watchID: watchID}
+	active, ok := b.sessions[key]
+	if !ok {
+		return 0, false
+	}
+	previousMessageID := active.lastMessageID
+	active.lastMessageID = messageID
+	b.sessions[key] = active
+	return previousMessageID, true
 }
 
 func (b *Bot) dismiss(chatID int64, watchID int) {
@@ -578,9 +603,21 @@ func (b *Bot) registerCommands(ctx context.Context) error {
 	})
 }
 
-func (b *Bot) send(ctx context.Context, chatID int64, text string, silent bool, keyboard *telegram.InlineKeyboardMarkup) {
-	if err := b.telegram.SendMessage(ctx, chatID, text, silent, keyboard); err != nil {
+func (b *Bot) send(ctx context.Context, chatID int64, text string, silent bool, keyboard *telegram.InlineKeyboardMarkup) int64 {
+	message, err := b.telegram.SendMessage(ctx, chatID, text, silent, keyboard)
+	if err != nil {
 		b.log.Error("send Telegram message", "chat_id", chatID, "error", err)
+		return 0
+	}
+	if message == nil {
+		return 0
+	}
+	return message.MessageID
+}
+
+func (b *Bot) deleteMessage(ctx context.Context, chatID, messageID int64) {
+	if err := b.telegram.DeleteMessage(ctx, chatID, messageID); err != nil {
+		b.log.Error("delete Telegram message", "chat_id", chatID, "message_id", messageID, "error", err)
 	}
 }
 
@@ -777,9 +814,8 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 	})
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s ETAs:", watchLabel(watch))
 	urgent := false
-	for _, result := range results {
+	for i, result := range results {
 		var labels []string
 		for _, bus := range result.arrivals {
 			arrivalTime, err := time.Parse(time.RFC3339, bus.EstimatedArrival)
@@ -790,17 +826,20 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 			if remaining < 2*time.Minute {
 				urgent = true
 			}
-			label := durationLabel(remaining)
-			if load := loadLabel(bus.Load); load != "" {
-				label += " (" + load + ")"
+			label := durationMinutesLabel(remaining)
+			if loadLabel(bus.Load) == "standing" {
+				label += " (standing)"
 			}
 			labels = append(labels, label)
 		}
-		fmt.Fprintf(&text, "\n\nBus %s at %s (%s)\n", result.serviceNo, result.stop.Name, result.stop.Code)
+		if i > 0 {
+			text.WriteString("\n\n")
+		}
+		fmt.Fprintf(&text, "%s at %s (%s)\n", result.serviceNo, result.stop.Name, result.stop.Code)
 		if len(labels) == 0 {
 			text.WriteString("No ETA available.")
 		} else {
-			text.WriteString("ETA: " + strings.Join(labels, ", "))
+			text.WriteString("ETA(mins): " + strings.Join(labels, ", "))
 		}
 	}
 	return text.String(), urgent
@@ -847,11 +886,11 @@ func watchCombinations(watch store.Watch) []store.WatchCombination {
 	return combinations
 }
 
-func durationLabel(duration time.Duration) string {
+func durationMinutesLabel(duration time.Duration) string {
 	if duration < time.Minute {
 		return "Arr"
 	}
-	return fmt.Sprintf("%d min", int(duration/time.Minute))
+	return fmt.Sprintf("%d", int(duration/time.Minute))
 }
 
 func loadLabel(load string) string {
