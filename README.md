@@ -100,7 +100,7 @@ pulls are required.
 ## Commands
 
 ```text
-/add <stop[, stop...]> | <service[, service...]>
+/add <stop[, stop...]> ; <service[, service...]>
 /watchlist
 /alias <watch> <name>
 /delete <watch>
@@ -113,8 +113,8 @@ pulls are required.
 Example:
 
 ```text
-/add 02049 | 36
-/add 02049, 04167 | 36, 111
+/add 02049 ; 36
+/add 02049, 04167 ; 36, 111
 /alias 1 home
 /notify home
 /schedule home 07:30
