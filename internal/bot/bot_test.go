@@ -174,7 +174,7 @@ func TestWatchSelectionCallbacksPerformActions(t *testing.T) {
 			Chat:      telegram.Chat{ID: chatID},
 		},
 	})
-	if len(client.messages) < 2 || !strings.Contains(client.messages[len(client.messages)-1].text, "Watch #1 ETAs:") {
+	if len(client.messages) < 2 || !strings.Contains(client.messages[len(client.messages)-1].text, "ETAs:") {
 		t.Fatalf("messages = %#v", client.messages)
 	}
 
@@ -191,7 +191,7 @@ func TestWatchSelectionCallbacksPerformActions(t *testing.T) {
 	}
 }
 
-func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
+func TestFormatETAIsUrgentBelowThreeMinutes(t *testing.T) {
 	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.FixedZone("SGT", 8*60*60))
 	watch := store.Watch{
 		ID:         3,
@@ -201,7 +201,7 @@ func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
 	services := []lta.ServiceArrival{{
 		ServiceNo: "36",
 		NextBus: lta.Arrival{
-			EstimatedArrival: now.Add(119 * time.Second).Format(time.RFC3339),
+			EstimatedArrival: now.Add(179 * time.Second).Format(time.RFC3339),
 			Load:             "SEA",
 		},
 		NextBus2: lta.Arrival{
@@ -214,12 +214,12 @@ func TestFormatETAIsUrgentBelowTwoMinutes(t *testing.T) {
 	if !urgent {
 		t.Fatal("urgent = false, want true")
 	}
-	if !strings.Contains(text, "1 min (seats), 5 min (standing)") {
+	if !strings.Contains(text, "2 min (seats), 5 min (standing)") {
 		t.Fatalf("text = %q", text)
 	}
 }
 
-func TestFormatETAAtTwoMinutesIsSilent(t *testing.T) {
+func TestFormatETAAtThreeMinutesIsSilent(t *testing.T) {
 	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
 	watch := store.Watch{
 		ID:         1,
@@ -229,13 +229,37 @@ func TestFormatETAAtTwoMinutesIsSilent(t *testing.T) {
 	services := []lta.ServiceArrival{{
 		ServiceNo: "36",
 		NextBus: lta.Arrival{
-			EstimatedArrival: now.Add(2 * time.Minute).Format(time.RFC3339),
+			EstimatedArrival: now.Add(3 * time.Minute).Format(time.RFC3339),
 		},
 	}}
 
 	_, urgent := formatETA(watch, map[string][]lta.ServiceArrival{"02049": services}, now)
 	if urgent {
-		t.Fatal("urgent = true at exactly two minutes, want false")
+		t.Fatal("urgent = true at exactly three minutes, want false")
+	}
+}
+
+func TestETAHeaderDoesNotIncludeWatchLabel(t *testing.T) {
+	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
+	watch := store.Watch{
+		ID:         1,
+		Alias:      "home",
+		Stops:      []store.WatchStop{{Code: "02049", Name: "Raffles Hotel"}},
+		ServiceNos: []string{"36"},
+	}
+	services := []lta.ServiceArrival{{
+		ServiceNo: "36",
+		NextBus: lta.Arrival{
+			EstimatedArrival: now.Add(5 * time.Minute).Format(time.RFC3339),
+		},
+	}}
+
+	text, _ := formatETA(watch, map[string][]lta.ServiceArrival{"02049": services}, now)
+	if strings.HasPrefix(text, "Watch") || strings.Contains(text, "home ETAs") || strings.Contains(text, "#1 ETAs") {
+		t.Fatalf("text includes watch label: %q", text)
+	}
+	if !strings.HasPrefix(text, "ETAs:") {
+		t.Fatalf("text = %q, want ETA-only header", text)
 	}
 }
 
@@ -347,6 +371,20 @@ func TestNotificationKeyboardShowsDismissOnlyForActiveSession(t *testing.T) {
 	active := notificationKeyboard(4, true).InlineKeyboard[0]
 	if len(active) != 2 || active[0].Text != "Keep notifying (15 mins)" || active[1].Text != "Dismiss" {
 		t.Fatalf("active buttons = %#v", active)
+	}
+}
+
+func TestUrgentActiveETASchedulesSoonerUpdate(t *testing.T) {
+	b := &Bot{log: slog.Default(), sessions: make(map[sessionKey]session)}
+	now := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
+	b.activate(42, 3, now)
+
+	b.scheduleSooner(42, 3, now.Add(approachingInterval))
+
+	key := sessionKey{chatID: 42, watchID: 3}
+	active := b.sessions[key]
+	if !active.nextAt.Equal(now.Add(approachingInterval)) {
+		t.Fatalf("next update = %s, want %s", active.nextAt, now.Add(approachingInterval))
 	}
 }
 

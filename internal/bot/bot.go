@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	addUsage           = "Usage: /add <stop[, stop...]> ; <service[, service...]>\nExample: /add 02049, 04167 ; 36, 111"
-	emptyWatchlistHelp = "Your watchlist is empty. Add one with /add <stop> ; <service>."
-	sessionDuration    = 15 * time.Minute
-	sessionExpiryGrace = 10 * time.Second
-	schedulerWorkers   = 8
-	schedulerQueueSize = 512
+	addUsage             = "Usage: /add <stop[, stop...]> ; <service[, service...]>\nExample: /add 02049, 04167 ; 36, 111"
+	emptyWatchlistHelp   = "Your watchlist is empty. Add one with /add <stop> ; <service>."
+	sessionDuration      = 15 * time.Minute
+	sessionExpiryGrace   = 10 * time.Second
+	schedulerWorkers     = 8
+	schedulerQueueSize   = 512
+	approachingThreshold = 3 * time.Minute
+	approachingInterval  = 30 * time.Second
 )
 
 type LTAClient interface {
@@ -524,6 +526,9 @@ func (b *Bot) sendETA(ctx context.Context, chatID int64, watch store.Watch, acti
 	}
 	now := time.Now()
 	text, urgent := formatETA(watch, arrivalsByStop, now)
+	if active && urgent {
+		b.scheduleSooner(chatID, watch.ID, now.Add(approachingInterval))
+	}
 	b.send(ctx, chatID, text, !urgent, notificationKeyboard(watch.ID, active))
 }
 
@@ -543,6 +548,20 @@ func (b *Bot) dismiss(chatID int64, watchID int) {
 	b.sessionsMu.Lock()
 	defer b.sessionsMu.Unlock()
 	delete(b.sessions, sessionKey{chatID: chatID, watchID: watchID})
+}
+
+func (b *Bot) scheduleSooner(chatID int64, watchID int, nextAt time.Time) {
+	b.sessionsMu.Lock()
+	defer b.sessionsMu.Unlock()
+	key := sessionKey{chatID: chatID, watchID: watchID}
+	active, exists := b.sessions[key]
+	if !exists {
+		return
+	}
+	if nextAt.Before(active.nextAt) && !nextAt.After(active.expiresAt) {
+		active.nextAt = nextAt
+		b.sessions[key] = active
+	}
 }
 
 func (b *Bot) dueSessions(now time.Time) []sessionKey {
@@ -777,7 +796,7 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 	})
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s ETAs:", watchLabel(watch))
+	text.WriteString("ETAs:")
 	urgent := false
 	for _, result := range results {
 		var labels []string
@@ -787,7 +806,7 @@ func formatETA(watch store.Watch, arrivalsByStop map[string][]lta.ServiceArrival
 				continue
 			}
 			remaining := arrivalTime.Sub(now)
-			if remaining < 2*time.Minute {
+			if remaining < approachingThreshold {
 				urgent = true
 			}
 			label := durationLabel(remaining)
