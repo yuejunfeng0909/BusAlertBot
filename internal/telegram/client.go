@@ -80,7 +80,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 	return result, err
 }
 
-func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, silent bool, keyboard *InlineKeyboardMarkup) error {
+func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, silent bool, keyboard *InlineKeyboardMarkup) (*Message, error) {
 	payload := map[string]any{
 		"chat_id":              chatID,
 		"text":                 text,
@@ -89,7 +89,18 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, sil
 	if keyboard != nil {
 		payload["reply_markup"] = keyboard
 	}
-	return c.call(ctx, "sendMessage", payload, nil)
+	var message Message
+	if err := c.call(ctx, "sendMessage", payload, &message); err != nil {
+		return nil, err
+	}
+	return &message, nil
+}
+
+func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
+	return c.call(ctx, "deleteMessage", map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	}, nil)
 }
 
 func (c *Client) AnswerCallback(ctx context.Context, callbackID, text string) error {

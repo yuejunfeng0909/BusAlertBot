@@ -24,14 +24,20 @@ type fakeTelegramClient struct {
 	messages []sentMessage
 	answers  []string
 	edits    []*telegram.InlineKeyboardMarkup
+	deletes  []int64
 }
 
 func (f *fakeTelegramClient) GetUpdates(context.Context, int64, time.Duration) ([]telegram.Update, error) {
 	return nil, nil
 }
 
-func (f *fakeTelegramClient) SendMessage(_ context.Context, _ int64, text string, _ bool, keyboard *telegram.InlineKeyboardMarkup) error {
+func (f *fakeTelegramClient) SendMessage(_ context.Context, _ int64, text string, _ bool, keyboard *telegram.InlineKeyboardMarkup) (*telegram.Message, error) {
 	f.messages = append(f.messages, sentMessage{text: text, keyboard: keyboard})
+	return &telegram.Message{MessageID: int64(len(f.messages))}, nil
+}
+
+func (f *fakeTelegramClient) DeleteMessage(_ context.Context, _ int64, messageID int64) error {
+	f.deletes = append(f.deletes, messageID)
 	return nil
 }
 
@@ -343,6 +349,19 @@ func TestValidWatchCombinationsKeepsOnlyServedPairs(t *testing.T) {
 	}
 }
 
+func TestActiveETASendDeletesPreviousUpdate(t *testing.T) {
+	b, data, client := newTestBot(t)
+	chatID := int64(42)
+	watch := addTestWatch(t, data, chatID)
+	b.activate(chatID, watch.ID, time.Now(), 99)
+
+	b.sendETA(context.Background(), chatID, watch, true)
+
+	if len(client.deletes) != 1 || client.deletes[0] != 99 {
+		t.Fatalf("deletes = %#v, want [99]", client.deletes)
+	}
+}
+
 func TestNotificationKeyboardShowsDismissOnlyForActiveSession(t *testing.T) {
 	prompt := notificationKeyboard(4, false).InlineKeyboard[0]
 	if len(prompt) != 1 || prompt[0].Text != "Keep notifying (15 mins)" || prompt[0].CallbackData != "keep:4" {
@@ -358,7 +377,7 @@ func TestNotificationKeyboardShowsDismissOnlyForActiveSession(t *testing.T) {
 func TestSessionSendsEveryMinuteForFifteenMinutes(t *testing.T) {
 	b := &Bot{log: slog.Default(), sessions: make(map[sessionKey]session)}
 	start := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
-	b.activate(42, 3, start)
+	b.activate(42, 3, start, 0)
 
 	for minute := 1; minute <= 15; minute++ {
 		due := b.dueSessions(start.Add(time.Duration(minute) * time.Minute))
@@ -374,7 +393,7 @@ func TestSessionSendsEveryMinuteForFifteenMinutes(t *testing.T) {
 func TestSessionDoesNotReplayUpdatesAfterExpiry(t *testing.T) {
 	b := &Bot{log: slog.Default(), sessions: make(map[sessionKey]session)}
 	start := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
-	b.activate(42, 3, start)
+	b.activate(42, 3, start, 0)
 
 	if due := b.dueSessions(start.Add(20 * time.Minute)); len(due) != 0 {
 		t.Fatalf("expired session returned %d due sessions, want 0", len(due))
@@ -384,12 +403,12 @@ func TestSessionDoesNotReplayUpdatesAfterExpiry(t *testing.T) {
 func TestKeepNotifyingExtendsFromClickWithoutResettingCadence(t *testing.T) {
 	b := &Bot{log: slog.Default(), sessions: make(map[sessionKey]session)}
 	start := time.Date(2026, time.June, 13, 7, 30, 0, 0, time.UTC)
-	b.activate(42, 3, start)
+	b.activate(42, 3, start, 0)
 
 	for minute := 1; minute <= 10; minute++ {
 		b.dueSessions(start.Add(time.Duration(minute) * time.Minute))
 	}
-	b.activate(42, 3, start.Add(10*time.Minute+30*time.Second))
+	b.activate(42, 3, start.Add(10*time.Minute+30*time.Second), 0)
 
 	key := sessionKey{chatID: 42, watchID: 3}
 	active := b.sessions[key]
