@@ -240,9 +240,16 @@ func TestFormatETAAtTwoMinutesIsSilent(t *testing.T) {
 }
 
 func TestParseAddArgs(t *testing.T) {
-	stops, services, ok := parseAddArgs(" 02049, 04167, 02049 | 36a, 111 ")
+	stops, services, ok := parseAddArgs(" 02049, 04167, 02049 ; 36a, 111 ")
 	if !ok || strings.Join(stops, ",") != "02049,04167" || strings.Join(services, ",") != "36A,111" {
 		t.Fatalf("got stops=%q services=%q ok=%v", stops, services, ok)
+	}
+}
+
+func TestParseAddArgsRejectsPipeSeparator(t *testing.T) {
+	stops, services, ok := parseAddArgs("02049 | 36")
+	if ok || stops != nil || services != nil {
+		t.Fatalf("got stops=%q services=%q ok=%v, want rejected pipe-separated input", stops, services, ok)
 	}
 }
 

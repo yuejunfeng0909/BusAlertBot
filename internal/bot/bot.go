@@ -17,6 +17,8 @@ import (
 )
 
 const (
+	addUsage           = "Usage: /add <stop[, stop...]> ; <service[, service...]>\nExample: /add 02049, 04167 ; 36, 111"
+	emptyWatchlistHelp = "Your watchlist is empty. Add one with /add <stop> ; <service>."
 	sessionDuration    = 15 * time.Minute
 	sessionExpiryGrace = 10 * time.Second
 	schedulerWorkers   = 8
@@ -142,7 +144,7 @@ func (b *Bot) handleMessage(ctx context.Context, message *telegram.Message) {
 func (b *Bot) handleAdd(ctx context.Context, chatID int64, args string) {
 	stopQueries, serviceNos, ok := parseAddArgs(args)
 	if !ok {
-		b.send(ctx, chatID, "Usage: /add <stop[, stop...]> | <service[, service...]>\nExample: /add 02049, 04167 | 36, 111", false, nil)
+		b.send(ctx, chatID, addUsage, false, nil)
 		return
 	}
 
@@ -208,7 +210,7 @@ func (b *Bot) handleAdd(ctx context.Context, chatID int64, args string) {
 func (b *Bot) handleWatchlist(ctx context.Context, chatID int64) {
 	watches := b.store.List(chatID)
 	if len(watches) == 0 {
-		b.send(ctx, chatID, "Your watchlist is empty. Add one with /add <stop> | <service>.", false, nil)
+		b.send(ctx, chatID, emptyWatchlistHelp, false, nil)
 		return
 	}
 	var text strings.Builder
@@ -430,7 +432,7 @@ func (b *Bot) handleCallback(ctx context.Context, callback *telegram.CallbackQue
 func (b *Bot) promptWatchSelection(ctx context.Context, chatID int64, action, prompt string) {
 	watches := b.store.List(chatID)
 	if len(watches) == 0 {
-		b.send(ctx, chatID, "Your watchlist is empty. Add one with /add <stop> | <service>.", false, nil)
+		b.send(ctx, chatID, emptyWatchlistHelp, false, nil)
 		return
 	}
 	b.send(ctx, chatID, prompt, false, watchSelectionKeyboard(action, watches))
@@ -612,7 +614,7 @@ func splitCommand(text string) (string, string) {
 }
 
 func parseAddArgs(args string) ([]string, []string, bool) {
-	parts := strings.SplitN(args, "|", 2)
+	parts := strings.SplitN(args, ";", 2)
 	if len(parts) != 2 {
 		return nil, nil, false
 	}
@@ -684,7 +686,7 @@ func formatStopMatches(stops []lta.BusStop) string {
 	for _, stop := range stops {
 		fmt.Fprintf(&text, "\n%s - %s, %s", stop.BusStopCode, stop.Description, stop.RoadName)
 	}
-	text.WriteString("\n\nAdd with /add <code[, code...]> | <service[, service...]>.")
+	text.WriteString("\n\nAdd with /add <code[, code...]> ; <service[, service...]>.")
 	return text.String()
 }
 
@@ -931,7 +933,7 @@ func sleepContext(ctx context.Context, duration time.Duration) bool {
 
 const helpText = `Bus ETA watchlist
 
-/add <stop[, stop...]> | <service[, service...]> - add a watch
+/add <stop[, stop...]> ; <service[, service...]> - add a watch
 /watchlist - list watches, IDs, and aliases
 /alias <watch> <name> - add or change a watch alias
 /delete <watch> - delete a watch
